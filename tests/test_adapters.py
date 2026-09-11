@@ -123,3 +123,22 @@ def test_bounded_adapter_process():
         bounded_run([sys.executable, "-c", "while True: print('x'*8192)"], limit=1000)
     with pytest.raises(TimeoutError):
         bounded_run([sys.executable, "-c", "import time;time.sleep(10)"], timeout=0.1)
+
+
+def test_trusted_transport_uses_a_pipe_and_drains_both_directions():
+    script = """
+import os, stat, sys
+assert stat.S_ISFIFO(os.fstat(0).st_mode)
+sys.stdout.buffer.write(b'x' * 1024 * 1024)
+sys.stdout.buffer.flush()
+payload = sys.stdin.buffer.read()
+print(len(payload))
+"""
+    code, output, errors = bounded_run(
+        [sys.executable, "-c", script],
+        payload=b"a" * (2 * 1024 * 1024),
+        limit=2 * 1024 * 1024,
+        timeout=5,
+    )
+    assert code == 0 and not errors
+    assert output == b"x" * (1024 * 1024) + b"2097152\n"

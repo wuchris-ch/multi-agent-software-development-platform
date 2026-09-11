@@ -8,13 +8,23 @@ from pathlib import Path
 import typer
 
 from . import __version__
+from .candidates import Recipe, Workbench
+from .credentials import GatewayProfile
 from .io import lock
 from .models import Submission
 from .service import request
 from .service import serve as run_service
 from .store import Store
 
-app = typer.Typer(no_args_is_help=True, help="Durable local software engineering jobs")
+app = typer.Typer(
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+    help="Durable local software engineering jobs",
+)
+candidate_app = typer.Typer(
+    no_args_is_help=True, help="Import and inspect local repository patches"
+)
+app.add_typer(candidate_app, name="candidate")
 DEFAULT_STATE = Path.home() / "Library/Application Support/SWEPlatform"
 
 
@@ -113,3 +123,44 @@ def inspect(ctx: typer.Context, job_id: str):
 def cancel(ctx: typer.Context, job_id: str):
     """Persist cancellation; status confirms when execution has stopped."""
     emit(request(ctx.obj, "cancel", job_id=job_id))
+
+
+@candidate_app.command("import")
+def import_candidate(
+    ctx: typer.Context,
+    source: Path,
+    patch: Path,
+    recipe: Path,
+    allow: list[str] = typer.Option(...),
+):
+    """Import a bounded local patch from a clean repository and pin its trusted recipe."""
+    spec = Recipe.model_validate_json(recipe.read_bytes())
+    emit(Workbench(ctx.obj).intake(source.resolve(), patch.read_bytes(), allow, spec))
+
+
+@candidate_app.command("verify")
+def verify_candidate(ctx: typer.Context, sha: str):
+    """Run the pinned public recipe on an immutable snapshot without network or credentials."""
+    emit(Workbench(ctx.obj).verify(sha))
+
+
+@candidate_app.command("review")
+def review_candidate(ctx: typer.Context, sha: str, flue_cli: Path, gateway_profile: Path):
+    """Obtain a fresh Flue verdict using a private Keychain-backed gateway profile."""
+    profile = GatewayProfile.model_validate_json(gateway_profile.read_bytes())
+    node = shutil.which("node")
+    if node is None:
+        raise typer.BadParameter("Node is unavailable")
+    emit(Workbench(ctx.obj).review(sha, flue_cli, profile, node))
+
+
+@candidate_app.command("repair")
+def repair_candidate(ctx: typer.Context, sha: str, patch: Path):
+    """Import a replacement patch against the original base, with a two-repair limit."""
+    emit(Workbench(ctx.obj).repair(sha, patch.read_bytes()))
+
+
+@candidate_app.command("inspect")
+def inspect_candidate(ctx: typer.Context, sha: str):
+    """Validate evidence against the exact candidate and display the local patch path."""
+    emit(Workbench(ctx.obj).inspect(sha))

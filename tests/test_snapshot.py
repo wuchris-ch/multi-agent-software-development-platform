@@ -56,7 +56,12 @@ def test_snapshot_rejects_dirty_and_seal_symlinks(repository, tmp_path):
         seal(destination, Artifacts(tmp_path / "artifacts"), base["base_revision"], [])
     (destination / "escape").symlink_to("/etc/passwd")
     with pytest.raises(ValueError, match="Non-regular"):
-        seal(destination, Artifacts(tmp_path / "artifacts"), base["base_revision"], ["calc.py"])
+        seal(
+            destination,
+            Artifacts(tmp_path / "artifacts"),
+            base["base_revision"],
+            ["calc.py", "escape"],
+        )
 
 
 @pytest.mark.parametrize(

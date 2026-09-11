@@ -97,6 +97,11 @@ def materialize(root: Path, files):
 
 
 def seal(root: Path, artifacts: Artifacts, base_revision: str, allowed_paths):
+    untracked = set(
+        git(root, "ls-files", "--others", "--exclude-standard", "-z").decode().split("\0")
+    ) - {""}
+    if untracked - set(allowed_paths):
+        raise ValueError("Candidate added paths outside the allowed scope")
     files = {}
     total = 0
     for folder, directories, filenames in os.walk(root, followlinks=False):

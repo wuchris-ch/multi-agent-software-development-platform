@@ -32,7 +32,8 @@ def test_fixture_ready_local_and_duplicate(service):
 @pytest.mark.parametrize(
     "fault", ["after_intent", "after_spawn", "before_completion", "after_artifacts"]
 )
-def test_process_crash_boundaries(service, fault):
+@pytest.mark.parametrize("repetition", range(5))
+def test_process_crash_boundaries(service, fault, repetition):
     service.stop()
     service.start(fault)
     job_id = submit(service, delay_seconds=0.5)

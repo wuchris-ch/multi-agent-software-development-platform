@@ -1,0 +1,406 @@
+import base64
+import json
+import os
+import selectors
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from ..adapters.codex import collect
+from ..credentials import GatewayProfile
+from ..io import atomic_write, canonical, digest, lock
+from ..process import bounded_run
+from ..sandbox.docker import Docker, safe_path
+
+CODEX_IMAGE = "sha256:9a72f4e1ed563ee949496b0b345c8c47559beef87130c93ab3ae9a49789f1d18"
+
+
+class BrokerPolicy:
+    """Every frame is untrusted, including frames spoofed by arbitrary worker code."""
+
+    def __init__(self, model, *, deadline, max_requests=12, max_output_tokens=4096):
+        self.model = model
+        self.deadline = deadline
+        self.max_requests = max_requests
+        self.max_output_tokens = max_output_tokens
+        self.requests = 0
+        self.request_ids = set()
+
+    def authorize(self, frame):
+        if time.time() >= self.deadline or self.requests >= self.max_requests:
+            raise ValueError("Model request allowance exhausted")
+        if (
+            not isinstance(frame, dict)
+            or set(frame) != {"type", "id", "path", "body"}
+            or frame["type"] != "model_request"
+            or frame["path"] != "/v1/responses"
+        ):
+            raise ValueError("Unsupported model operation")
+        if not isinstance(frame["id"], str) or not 1 <= len(frame["id"]) <= 100:
+            raise ValueError("Invalid request identity")
+        if frame["id"] in self.request_ids:
+            raise ValueError("Duplicate model request identity")
+        if not isinstance(frame["body"], str) or len(frame["body"]) > 1400000:
+            raise ValueError("Invalid model request body")
+        data = base64.b64decode(frame["body"], validate=True)
+        if len(data) > 1024 * 1024:
+            raise ValueError("Model request too large")
+        body = json.loads(data)
+        allowed = {
+            "model",
+            "input",
+            "instructions",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "reasoning",
+            "text",
+            "stream",
+            "store",
+            "include",
+            "max_output_tokens",
+            "prompt_cache_key",
+            "previous_response_id",
+            "metadata",
+            "client_metadata",
+            "service_tier",
+        }
+        if not isinstance(body, dict) or set(body) - allowed:
+            raise ValueError("Unsupported model request fields")
+        if body.get("previous_response_id"):
+            raise ValueError("Cross-request response handles are disabled")
+        if not isinstance(body.get("tools", []), list):
+            raise ValueError("Invalid tool definitions")
+        for tool in body.get("tools", []):
+            if not isinstance(tool, dict) or tool.get("type") not in ("function", "custom"):
+                raise ValueError("Hosted tools are disabled")
+
+        def check(value):
+            if isinstance(value, dict):
+                if set(value) & {"image_url", "file_url", "file_id", "audio_url"}:
+                    raise ValueError("Remote media and file handles are disabled")
+                for nested in value.values():
+                    check(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    check(nested)
+
+        check(body)
+        requested = body.get("max_output_tokens", self.max_output_tokens)
+        if type(requested) is not int or requested <= 0:
+            raise ValueError("Invalid output token allowance")
+        body["max_output_tokens"] = min(requested, self.max_output_tokens)
+        body["model"] = self.model
+        body["store"] = False
+        body.pop("metadata", None)
+        body.pop("client_metadata", None)
+        body.pop("prompt_cache_key", None)
+        body.pop("service_tier", None)
+        self.requests += 1
+        self.request_ids.add(frame["id"])
+        return body
+
+
+def mask_model_metadata(raw, content_type):
+    def replace(value):
+        if isinstance(value, dict):
+            if "model" in value:
+                value["model"] = "worker"
+            if isinstance(value.get("response"), dict) and "model" in value["response"]:
+                value["response"]["model"] = "worker"
+        return value
+
+    if "text/event-stream" in content_type:
+        lines = []
+        for line in raw.decode().splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                line = "data: " + json.dumps(replace(json.loads(line[6:])), separators=(",", ":"))
+            lines.append(line)
+        return ("\n".join(lines) + "\n\n").encode()
+    return canonical(replace(json.loads(raw)))
+
+
+class HostGateway:
+    def __init__(self, profile: GatewayProfile):
+        self.environment = profile.environment()
+        self.profile = profile
+        self.identity_sha256 = digest(canonical(profile.model_dump()))
+        self.node = shutil.which("node")
+        if self.node is None:
+            raise ValueError("Node is required for the model transport")
+
+    def request(self, body, deadline):
+        remaining = max(1, min(45, deadline - time.time()))
+        payload = {
+            "url": self.profile.base_url.rstrip("/") + "/responses",
+            "key": self.environment["MODEL_GATEWAY_API_KEY"],
+            "body": body,
+            "timeout_ms": int(remaining * 1000),
+        }
+        code, stdout, _ = bounded_run(
+            [self.node, str(Path(__file__).with_name("gateway.mjs"))],
+            payload=canonical(payload),
+            env={"PATH": os.defpath},
+            timeout=remaining + 2,
+            limit=6 * 1024 * 1024,
+        )
+        if code:
+            raise ValueError("Model transport process failed")
+        response = json.loads(stdout)
+        if response["status"] != 200:
+            return (
+                response["status"],
+                "application/json",
+                canonical({"error": {"message": "model gateway request failed"}}),
+            )
+        content_type = response["content_type"]
+        raw = mask_model_metadata(base64.b64decode(response["body"]), content_type)
+        return 200, content_type, raw
+
+
+class CodingRun:
+    def __init__(self, root: Path, image=None):
+        self.root = root
+        # The caller chooses a vetted immutable image, never repository configuration.
+        self.docker = Docker(
+            root / "containers",
+            image=image or os.environ.get("SWE_PLATFORM_CODING_IMAGE", CODEX_IMAGE),
+        )
+
+    def cancel(self, key):
+        execution = digest(key.encode())
+        directory = self.root / execution
+        if not (directory / "intent.json").exists():
+            raise ValueError("Unknown coding submission")
+        # Cancellation can interrupt the run without acquiring its lifetime lock.
+        atomic_write(directory / "cancel", b"cancel requested\n")
+        self.docker.cancel(execution)
+        return {
+            "execution_id": execution,
+            "state": "stopped",
+            "receipt_available": (directory / "result.json").exists(),
+        }
+
+    def run(self, key, files, task, allowed, gateway, *, timeout=180, max_requests=12):
+        if not key or len(key) > 200 or not 1 <= len(task.encode()) <= 16000:
+            raise ValueError("Invalid coding job identity or task")
+        if not 1 <= timeout <= 1200 or not 1 <= max_requests <= 30:
+            raise ValueError("Invalid coding budget")
+        for name in [*files, *allowed]:
+            safe_path(name)
+        if sum(len(v["data"]) for v in files.values()) > 8 * 1024 * 1024:
+            raise ValueError("Coding input too large")
+        execution = digest(key.encode())
+        directory = self.root / execution
+        with lock(directory / "control.lock"):
+            if (directory / "cancel").exists():
+                raise ValueError("Coding attempt was cancelled; use a new submission key")
+            spec = {
+                "files": files,
+                "task": task,
+                "allowed": allowed,
+                "timeout": timeout,
+                "max_requests": max_requests,
+                "image": self.docker.image,
+                "profile_sha256": gateway.identity_sha256,
+            }
+            request_sha = digest(canonical(spec))
+            intent = directory / "intent.json"
+            if intent.exists():
+                previous = json.loads(intent.read_bytes())
+                if previous["request_sha256"] != request_sha:
+                    raise ValueError("Coding submission key already has another payload")
+                receipt = directory / "result.json"
+                if receipt.exists():
+                    return json.loads(receipt.read_bytes())
+                raise ValueError(
+                    "Coding attempt has no receipt; reconcile its container before resubmitting"
+                )
+            deadline = time.time() + timeout
+            atomic_write(
+                intent,
+                canonical(
+                    {"request_sha256": request_sha, "deadline": deadline, "execution_id": execution}
+                ),
+            )
+            payload = directory / "input.json"
+            atomic_write(payload, canonical({**spec, "deadline": deadline}))
+            payload.chmod(0o444)
+            runner = Path(__file__).with_name("worker.py").resolve()
+            name = self.docker.name(execution)
+            launch_control = self.docker.root / name
+            with lock(launch_control / "control.lock"):
+                if (launch_control / "cancel").exists() or (directory / "cancel").exists():
+                    raise ValueError("Coding attempt was cancelled before launch")
+                self.docker.command(
+                    "create",
+                    "--name",
+                    name,
+                    "--label",
+                    f"swe.execution={execution}",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--user",
+                    "65534:65534",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--init",
+                    "--cpus",
+                    "1",
+                    "--memory",
+                    "512m",
+                    "--memory-swap",
+                    "512m",
+                    "--pids-limit",
+                    "96",
+                    "--tmpfs",
+                    "/work:rw,exec,nosuid,nodev,size=64m,mode=1777",
+                    "--tmpfs",
+                    "/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777",
+                    "--log-driver",
+                    "none",
+                    "--interactive",
+                    "--mount",
+                    f"type=bind,source={payload.resolve()},target=/input.json,readonly",
+                    "--mount",
+                    f"type=bind,source={runner},target=/runner.py,readonly",
+                    "--entrypoint",
+                    "python",
+                    self.docker.image,
+                    "-I",
+                    "/runner.py",
+                )
+                process = subprocess.Popen(
+                    [self.docker.executable, "start", "--attach", "--interactive", name],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                # Do not release launch ownership while docker start can still launch late.
+                launch_deadline = time.monotonic() + 10
+                while time.monotonic() < launch_deadline:
+                    started = self.docker.inspect(execution)
+                    if started and started["State"]["Status"] != "created":
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.02)
+                else:
+                    process.kill()
+                    process.wait()
+                    self.docker._cancel(execution)
+                    raise ValueError("Container launch could not be confirmed")
+            policy = BrokerPolicy(
+                gateway.profile.model, deadline=deadline, max_requests=max_requests
+            )
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
+            frames = bytearray()
+            errors = bytearray()
+            completion = None
+            try:
+                while selector.get_map() and time.time() < deadline + 3:
+                    if (directory / "cancel").exists():
+                        raise ValueError("Coding attempt was cancelled")
+                    for event, _ in selector.select(0.1):
+                        chunk = os.read(event.fd, 65536)
+                        if not chunk:
+                            selector.unregister(event.fileobj)
+                            continue
+                        if event.fileobj is process.stderr:
+                            errors.extend(chunk)
+                            if len(errors) > 16384:
+                                raise ValueError("Container diagnostic limit exceeded")
+                            continue
+                        frames.extend(chunk)
+                        if len(frames) > 4 * 1024 * 1024:
+                            raise ValueError("Worker frame limit exceeded")
+                        while b"\n" in frames:
+                            line, _, tail = frames.partition(b"\n")
+                            frames = bytearray(tail)
+                            frame = json.loads(line)
+                            if frame.get("type") == "model_request":
+                                if completion is not None:
+                                    raise ValueError("Model request after completion")
+                                body = policy.authorize(frame)
+                                if (directory / "cancel").exists():
+                                    raise ValueError("Coding attempt was cancelled")
+                                status, content_type, data = gateway.request(body, deadline)
+                                reply = {
+                                    "id": frame["id"],
+                                    "status": status,
+                                    "content_type": content_type,
+                                    "body": base64.b64encode(data).decode(),
+                                }
+                                process.stdin.write(canonical(reply) + b"\n")
+                                process.stdin.flush()
+                            elif frame.get("type") == "completion" and completion is None:
+                                completion = frame
+                            else:
+                                raise ValueError("Invalid worker protocol frame")
+                process.wait(timeout=3)
+                state = self.docker.inspect(execution)
+                if state is None or state["State"]["Running"]:
+                    raise ValueError("Container termination is unconfirmed")
+                if frames.strip():
+                    raise ValueError("Truncated worker protocol frame")
+                if not completion or process.returncode or completion["reason"]:
+                    atomic_write(
+                        directory / "failure.json",
+                        canonical(
+                            {
+                                "attach_exit": process.returncode,
+                                "worker_exit": completion.get("exit_code") if completion else None,
+                                "reason": completion.get("reason")
+                                if completion
+                                else "missing_completion",
+                                "diagnostic": completion.get("diagnostic", "")
+                                if completion
+                                else errors.decode(errors="replace"),
+                            }
+                        ),
+                    )
+                    raise ValueError("Coding execution did not produce a complete candidate")
+                parsed = collect(base64.b64decode(completion["events"]), completion["exit_code"])
+                if set(completion["files"]) != set(allowed):
+                    raise ValueError("Candidate output scope mismatch")
+                total = 0
+                for value in completion["files"].values():
+                    if value is None:
+                        continue
+                    if set(value) != {"data", "mode"} or value["mode"] not in (0o644, 0o755):
+                        raise ValueError("Invalid candidate output file")
+                    total += len(base64.b64decode(value["data"], validate=True))
+                if total > 256 * 1024:
+                    raise ValueError("Candidate output limit exceeded")
+                result = {
+                    "execution_id": execution,
+                    "request_sha256": request_sha,
+                    "files": completion["files"],
+                    "model_requests": policy.requests,
+                    "usage": parsed["usage"],
+                    "cost_usd": None,
+                    "adapter_version": "codex-cli/0.153.4",
+                    "image": self.docker.image,
+                    "profile_sha256": gateway.identity_sha256,
+                    "status": "completed",
+                }
+                atomic_write(directory / "result.json", canonical(result))
+                self.docker.remove(execution)
+                return result
+            except BaseException:
+                # Termination is checked through Docker, not inferred from an attach process exit.
+                self.docker.cancel(execution)
+                raise
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                selector.close()
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    pipe.close()

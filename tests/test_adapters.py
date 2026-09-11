@@ -102,7 +102,7 @@ def test_repair_limits_and_identical_candidate():
     assert RepairPolicy().decide("ok", True, False, "none")[0] == "ready_local"
 
 
-def test_codex_stream_and_disabled_auth_path():
+def test_codex_stream_and_explicit_broker_path():
     events = [
         {"type": "thread.started", "thread_id": "session"},
         {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
@@ -114,8 +114,7 @@ def test_codex_stream_and_disabled_auth_path():
         codex.collect(raw[:-1], 0)
     with pytest.raises(ValueError):
         codex.collect(raw, 1)
-    with pytest.raises(RuntimeError, match="disabled"):
-        codex.start()
+    assert codex.capabilities()["enabled"]
     assert "--ignore-user-config" in codex.invocation("explicit-model")
 
 

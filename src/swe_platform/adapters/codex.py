@@ -1,24 +1,22 @@
 import json
 
 TESTED_VERSION = "0.153.4"
-DISABLED_REASON = (
-    "Real Codex execution is disabled: a short-lived model broker and enforced "
-    "broker-only network profile have not been validated. Do not mount CLI auth files."
-)
 
 
 def capabilities():
     return {
         "adapter": "codex-jsonl/v1",
         "tested_cli_version": TESTED_VERSION,
-        "enabled": False,
-        "reason": DISABLED_REASON,
-        "usage": "tokens_if_reported; subscription_cost_unknown",
+        "enabled": True,
+        "transport": "host broker over attached container pipes; worker network disabled",
+        "usage": "tokens_if_reported; cost_unknown",
     }
 
 
-def start(*_args, **_kwargs):
-    raise RuntimeError(DISABLED_REASON)
+def start(root, *args, **kwargs):
+    from ..broker.host import CodingRun
+
+    return CodingRun(root).run(*args, **kwargs)
 
 
 def invocation(model: str):

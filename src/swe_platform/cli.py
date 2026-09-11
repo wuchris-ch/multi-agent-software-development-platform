@@ -8,7 +8,10 @@ from pathlib import Path
 import typer
 
 from . import __version__
+from .adapters.codex import capabilities
+from .broker.host import CodingRun, HostGateway
 from .candidates import Recipe, Workbench
+from .coding import CandidateCoding
 from .credentials import GatewayProfile
 from .io import lock
 from .models import Submission
@@ -73,7 +76,7 @@ def doctor():
             )
         except subprocess.TimeoutExpired:
             checks[tool] = "unavailable"
-    checks["coding_adapter"] = "disabled: credential broker and network profile not verified"
+    checks["coding_adapter"] = capabilities()
     checks["scripted_fixture"] = "available; fixed trusted code only"
     emit(checks)
 
@@ -136,6 +139,42 @@ def import_candidate(
     """Import a bounded local patch from a clean repository and pin its trusted recipe."""
     spec = Recipe.model_validate_json(recipe.read_bytes())
     emit(Workbench(ctx.obj).intake(source.resolve(), patch.read_bytes(), allow, spec))
+
+
+@candidate_app.command("code")
+def code_candidate(
+    ctx: typer.Context,
+    source: Path,
+    recipe: Path,
+    gateway_profile: Path,
+    task: str = typer.Option(...),
+    allow: list[str] = typer.Option(...),
+    key: str = typer.Option(...),
+    image: str | None = None,
+    timeout: float = 180,
+    max_requests: int = 12,
+):
+    """Run one isolated coding worker and seal its local candidate under a durable key."""
+    spec = Recipe.model_validate_json(recipe.read_bytes())
+    profile = GatewayProfile.model_validate_json(gateway_profile.read_bytes())
+    emit(
+        CandidateCoding(ctx.obj, image=image).run(
+            key,
+            source.resolve(),
+            task,
+            allow,
+            spec,
+            HostGateway(profile),
+            timeout=timeout,
+            max_requests=max_requests,
+        )
+    )
+
+
+@candidate_app.command("stop-coding")
+def stop_coding(ctx: typer.Context, key: str):
+    """Stop a live or interrupted coding attempt and confirm its container is stopped."""
+    emit(CodingRun(ctx.obj / "coding").cancel(key))
 
 
 @candidate_app.command("verify")

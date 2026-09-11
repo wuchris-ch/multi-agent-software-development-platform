@@ -1,8 +1,4 @@
-"""Manual candidate intake and durable, exact-content verification.
-
-The workbench supports local patches while model-driven coding remains disabled.
-Repository code runs only in Docker. The external evaluator remains independent.
-"""
+"""Candidate intake and durable, exact-content verification."""
 
 import json
 import time
@@ -46,31 +42,34 @@ class Workbench:
         base = snapshot(source, directory / "repo")
         git(directory / "repo", "apply", "--check", "-", data=patch)
         git(directory / "repo", "apply", "-", data=patch)
-        sha, candidate = seal(directory / "repo", self.artifacts, base["base_revision"], allowed)
+        return self.register(source, directory / "repo", base, allowed, recipe, workflow)
+
+    def register(self, source, workspace, base, allowed, recipe, workflow):
+        """Seal trusted-host materialized output; this workspace is never a worker mount."""
+        sha, candidate = seal(workspace, self.artifacts, base["base_revision"], allowed)
         target = self.root / sha
         with lock(target / "control.lock"):
             if (target / "policy.json").exists():
                 previous = json.loads((target / "policy.json").read_bytes())
                 if previous["recipe"] != recipe.model_dump():
                     raise ValueError("Existing candidate has a different trusted recipe")
+                workflow = previous["workflow_id"]
             else:
                 policy = {
                     "candidate": sha,
                     "recipe": recipe.model_dump(),
                     "allowed_paths": allowed,
                     "base_revision": base["base_revision"],
-                    "workspace": str(directory / "repo"),
+                    "workspace": str(workspace),
                     "created": time.time(),
                     "review_required": True,
                     "workflow_id": workflow,
                     "source": str(source.resolve()),
                 }
                 atomic_write(target / "policy.json", canonical(policy))
-                if _workflow is None:
-                    atomic_write(
-                        self.root / "workflows" / workflow / "lineage.json",
-                        canonical({"candidates": [sha], "max_repairs": 2}),
-                    )
+            lineage = self.root / "workflows" / workflow / "lineage.json"
+            if not lineage.exists():
+                atomic_write(lineage, canonical({"candidates": [sha], "max_repairs": 2}))
         return {
             "candidate": sha,
             "changed_paths": candidate["changed_paths"],

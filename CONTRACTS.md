@@ -1,122 +1,48 @@
-# State and integration contracts
+# Contracts
 
-Proposed schema v1. JSON examples describe interfaces, not implemented endpoints. Use Pydantic validation and exported JSON Schema with explicit versioning. Breaking changes get a new schema version. Preserve unknown provider events privately as bounded opaque data; do not let them create state transitions.
+The executable models and adapters are authoritative. Persisted JSON uses canonical serialization and SHA-256 identities. Pydantic models reject extra fields, normalize defaults before hashing, and hide input values in validation errors.
 
-## Persistent records
+## Fixture service
 
-| Record | Key fields and constraints |
+`models.Submission` v1 contains a submission key, task description, adapter (`scripted` or `docker-scripted`), deadline, fixture delay, and behavior. Task text is descriptive for these deterministic fixtures; arbitrary repository coding uses `candidate code`.
+
+SQLite stores jobs, attempts, ordered events, and effects. A duplicate key with identical normalized payload returns the same job. A conflicting payload rejects. Updates compare job version and, where applicable, owner, epoch, and lease. A state transition and its effect intent are one transaction.
+
+The ordinary fixture path is `queued -> implementing -> verifying -> ready_local`. Incorrect fixture output becomes `rejected`. Cancellation persists `cancelling` before confirmed `cancelled`. Missing or unsafe execution evidence produces an attention or infrastructure outcome. A ready result may later become `stale`.
+
+The Unix-socket RPC uses an `ok` envelope around operation results so a job's own `error` field cannot be confused with a transport error. Operations are `submit`, `status`, `inspect`, and `cancel`.
+
+## Candidates and evidence
+
+| Record | Binding |
 |---|---|
-| Repository | `repo_id`, canonical path/remote, allowlist, trusted recipe digest, policy digest; secrets referenced, never stored inline |
-| Job | UUID, unique submission key, repo, base SHA, task artifact hash, mode, policy/recipe/adapter versions, state/version, deadline, cancellation flag, repair limit |
-| Attempt | UUID, job, stage, ordinal, owner, lease epoch/expiry, container ID, workspace ID, started/completed time, result, error class, session ID |
-| Artifact | Digest, type, size, private path, producer, candidate/base hashes, retention deadline; immutable content |
-| Evidence | Candidate digest, recipe/reviewer/evaluator identity, result, report hash, created time; no reuse on changed candidate |
-| Event | Job, monotonically increasing sequence, timestamp, actor, transition, attempt, safe metadata; unique `(job, sequence)` |
-| Effect | Unique `(job, kind, candidate, target)`, expected remote state, authorization ID, request digest, state, remote ID, reconcile time |
-| Authorization | Actor, repository, exact candidate, action set, expected target state, policy version, expiry; persisted before external action |
-| Budget | Job reservation, attempt reservation, usage, pricing version, completeness, units, release time |
-| Improvement proposal | Hypothesis, supporting run IDs, candidate config digest, parent version, experiment ID, promotion/rollback record |
+| `candidate/v1` | Base Git revision, files and modes, tree digest, changed paths, binary patch digest |
+| `verification-recipe/v1` | Immutable image, fixed argv, deadline |
+| Verification receipt | Candidate digest, recipe digest, exit status, reason, output artifact |
+| Review receipt | Candidate digest, validated Flue verdict, unknown cost where appropriate |
+| Coding receipt | Execution and request digests, scoped output, model request count, usage, image and private-profile digest |
+| Repair lineage | Ordered candidate digests and maximum two repairs |
 
-SQLite metadata is authoritative; append-only JSONL is an export, not a second transactional state store. Audit append-only behavior under one local administrator is not tamper-proof. Later use a separate immutable audit service and access controls.
+Candidate keys identify immutable content. Workflow journals identify activity around it. Verification receipts are reused only for the saved candidate and recipe. A current passing candidate with a clear review is `ready_local`; missing evidence is `needs_attention`, and a superseded candidate is `stale`.
 
-```mermaid
-stateDiagram-v2
-    [*] --> queued
-    queued --> preparing
-    preparing --> investigating
-    investigating --> implementing
-    implementing --> verifying
-    verifying --> reviewing
-    reviewing --> repairing: actionable failure and budget remains
-    verifying --> repairing: public test failure
-    repairing --> implementing
-    reviewing --> ready_local: required evidence passes
-    ready_local --> publishing: exact action authorized
-    publishing --> pr_ready: remote result verified
-    publishing --> reconciling: uncertain response
-    reconciling --> pr_ready: matching effect found
-    reconciling --> needs_attention: unresolved ambiguity
-    ready_local --> stale: candidate or remote context changed
-    pr_ready --> [*]
-```
+Candidate intake accepts an existing binary patch or a completed isolated coding result. New and deleted files are represented explicitly. Repair input is a replacement patch against the original base, rather than a patch against the previous candidate.
 
-All active states may transition to `cancelling`, `needs_attention`, or `failed_infra` through explicit policy. `cancelled` requires termination confirmation. `rejected` means collected evidence failed; `failed_infra` means trustworthy evidence could not be collected. `ready_local` is a successful local deliverable, while `pr_ready` requires verified publication. Retry scheduling is stored on attempts, not invented by the model.
+## Coding broker
 
-### Transition transaction
+A request frame contains exactly `type`, `id`, `path`, and a base64 body. The only path is `/v1/responses`. IDs must be unique within the attempt. The host replaces the requested model with trusted configuration and charges the request allowance before dispatch. Hosted tools, arbitrary transport fields, remote media, and cross-request response handles reject.
 
-Read current version and valid owner/epoch; validate evidence references; atomically compare-and-swap the job version, append event, and insert unique effect intent. Dispatch only after commit. Crash after commit is recoverable by scanning pending effects. A result from an old epoch is retained for diagnosis but cannot advance the job. A second submission with the same key and same payload returns the existing job; the same key with different content returns a conflict.
+Responses carry an ID, status, content type, and bounded base64 data. The Codex JSONL collector requires a successful exit, a final agent message, and a completed turn. Truncated streams, explicit errors, malformed usage, and events after completion reject. Dollar cost remains null when unreported.
 
-## Handoff and coding adapter
+An attempt with intent but no durable receipt is ambiguous. It is never automatically replayed. `candidate stop-coding` terminates its container; an intentional new invocation uses a new key. A durable receipt can complete candidate intake without another model call.
 
-```json
-{
-  "schema_version": "1.0",
-  "job_id": "job-example",
-  "attempt_id": "attempt-example",
-  "lease_epoch": 3,
-  "base_sha": "<immutable git commit>",
-  "task_artifact": "sha256:<digest>",
-  "allowed_paths": ["src/watcher.ts", "tests/watcher.test.ts"],
-  "acceptance": ["A changed PR head cannot receive a success for an unreviewed diff"],
-  "capability_profile": "isolated-coding-v1",
-  "budget": {"wall_seconds": 1200, "max_repairs": 2},
-  "output_contract": "candidate-v1"
-}
-```
+## Flue
 
-Worker result: `status` (`completed|blocked|error`), candidate artifact, changed paths, summary, reproduction, checks claimed, unresolved questions, and usage with completeness flags. Claims about checks are advisory until verified by the trusted runner. Specialist result: question, answer, base SHA, file/line evidence, uncertainty, and suggested next step; default 8 KiB limit and no nested delegation. Repository paths must be relative and normalized. References must resolve inside the assigned snapshot.
+The existing raw-diff CLI consumes exact diff bytes on stdin. Its v1 verdict includes `input_sha256`, `risk`, `blocked`, findings, and rationale. The adapter verifies the input digest and finding locations against changed lines. Malformed, oversized, inconsistent, or blocked output cannot establish a clear review.
 
-Adapter interface: `capabilities()`, `start(spec, workspace, credential_handle)`, `events(handle)`, `inspect(handle)`, `cancel(handle)`, `collect(handle)`. The platform launches fixed executable plus argv arrays, uses stdin for task text, and drains bounded stdout/stderr concurrently. No shell interpolation of issue content. Capture binary version, configuration hash, session ID, and terminal exit status. Unknown exit/partial JSON becomes incomplete execution, not success.
+The trusted Flue process receives only its model environment keys and a fresh home. Credential values, raw provider diagnostics, and worker prompts are not included in candidate review receipts.
 
-Codex's installed `exec` help supports stdin, `--json`, `--output-schema`, and `--ignore-user-config`; implement a version-tested isolated invocation rather than inheriting personal hooks, MCP tools, or broad permissions. The documented event stream is not a remote process ownership protocol. Claude's stream parser is a separate adapter with its own fixtures. No claim of safe hard dollar enforcement is made merely because a CLI emits usage at completion.
+## Evaluation and publication
 
-## Flue integration: existing contract, new wrapper
+`swe-platform.evaluation-proposal/v1` and `swe-platform.decision-binding/v1` are local evidence-binding fixtures. Validation binds issued execution identity, artifacts, candidate, policy, and evaluator revision. These intentionally use separate names from the evaluator's evolving wire schemas. A future bridge must authenticate origin and translate the differences recorded in [INTEGRATION.md](INTEGRATION.md), including candidate revisions and registered JSON artifact storage.
 
-Invoke the installed/pinned `pr-review-agent-flue/dist/cli.js` with exact UTF-8 diff bytes on stdin from a trusted adapter process. No `watcher.js`, no `--publish`, no GitHub token. Environment comes from a small explicit allowlist and the private model configuration. Source and artifact paths remain configurable, not hardcoded to Chris's home in application code.
-
-```json
-{
-  "schema_version": "1.0",
-  "input_sha256": "<64 lowercase hex characters>",
-  "risk": "low",
-  "blocked": false,
-  "findings": [],
-  "rationale": "<review explanation>"
-}
-```
-
-Existing finding fields: `severity` (`blocker|major|minor|info`), `category` (`security|correctness|style|performance`), `file`, positive `line`, `detail`. Validate digest, complete strict schema, severity/risk relationship, and candidate membership. Add changed-hunk line validation in the platform wrapper because the existing schema only requires a positive number. Invalid evidence pauses acceptance; never discard a malformed blocker and call the review clean.
-
-Current limits: 1 MiB complete diff, 96 KiB partition message, 120-second child limit, up to three actual HTTP requests per child and one fresh format correction per partition. Wrapper policy must account for partition count and all attempts. Oversized files stop for attention; silently reviewing a truncated diff is prohibited. Cost placeholders inside the existing provider are not billing data.
-
-The existing watcher keeps publishing its normal review after a PR exists. The platform publishes no competing `PR review agent` status or completion marker. Its PR body may summarize private prepublication review evidence. If a platform check is later added, use a distinct name and exact commit binding.
-
-## Evaluator integration
-
-Keep three distinct operations:
-
-1. Routine job verification uses a trusted recipe and candidate snapshot, with public feedback available for repair.
-2. Reviewer-quality experiments continue through the evaluator's existing `eval-review-agent` interface and versioned corpus.
-3. Platform policy experiments use an evaluator-owned coding task or a new black-box wrapper. The platform accepts only task input, emits a bounded result/candidate artifact, and does not see the suite manifest or goldens.
-
-Proposed request envelope: `schema_version`, `run_id`, `candidate_digest`, `base_sha`, `adapter_version`, `trace_projection_digest`, and declared environment identity. The evaluator privately selects suite and thresholds. Proposed result: `accepted|rejected|infra_error`, report digest, evaluator revision, suite identity safe for reporting, and metric projection. This exact envelope is new integration work, not an existing agent-eval-k3s API.
-
-For hidden coding tests, evaluator-owned infrastructure materializes the candidate in a separate execution environment and runs hidden checks there. Candidate code must not share host filesystem access with the hidden corpus. For isolated black-box tasks, expose only the declared application interface. Keep candidate workspaces, harness executables, and hidden tests on different trust boundaries. In personal deployment this is process/container separation under one owner, not protection from a malicious machine administrator.
-
-## GitHub effects and duplicate prevention
-
-Publisher receives: repository, branch, candidate commit/tree, base ref/SHA, desired draft title/body digest, effect key, and authorization record. Push only a dedicated branch with expected previous state, never force-update a human branch. Disable hooks and inherited helpers. Include a stable job marker in the draft PR body. Paginate lookup results and verify author, branch, base, head, and marker before adopting a match.
-
-States: `pending -> in_flight -> confirmed`, or `in_flight -> ambiguous -> reconciling`. Commit intent before calling GitHub. If the process dies after GitHub accepted a POST, query before repeating it. Serialize publication per repository/branch. GitHub does not provide an atomic transaction with SQLite, so this is reconciled at-least-once execution, not exactly-once delivery. If a request might still be completing and absence cannot be established, leave it ambiguous for attention instead of issuing an immediate duplicate POST. Cancellation stops future intents; an already accepted effect remains in the audit record.
-
-Bind reviews/tests to candidate hash, and publication approval to candidate plus target state. Recheck immediately before publishing; use commit-specific APIs where available and verify afterward. A race detected after publication yields `stale` evidence, never a claim that a later head was verified. Changes to the base require a fresh integration/test cycle.
-
-## Budgets, telemetry, and retention
-
-Proposed personal defaults: one active job, one writer, up to two read-only specialists only after M4, two repair rounds, 20-minute active job allowance, bounded per-stage retries, and 2 GiB artifacts per job. These are starting settings to measure, not proven ideal values. Wall deadlines persist across restart; sleeping beyond them pauses the task for attention instead of quietly extending spend.
-
-A metered adapter reserves the maximum next-call charge before dispatch, reconciles actual tokens with a versioned price table, and refuses requests beyond the remaining allocation. Concurrent calls share the same reservation ledger. Count coordinator, specialists, reviewer, repairs, and failed requests. If the provider cannot bound or report usage, expose `cost_unknown`; enforce wall/turn/concurrency limits and refuse strict-dollar mode. A broker can cap requests, but cannot infer an opaque CLI's internal billing without supported usage evidence. Do not treat subscription usage or Flue's zero placeholders as zero cost.
-
-Events: `job.created`, `attempt.started`, `artifact.sealed`, `check.completed`, `review.completed`, `repair.requested`, `effect.confirmed`, `job.cancelled`. Safe attributes: job/attempt IDs, stage, policy and artifact digests, public adapter alias, durations, outcome class, usage completeness. Do not export task text, diffs, command bodies, raw tool output, credential data, private endpoints, or internal model/provider identifiers. Redact at collection, not only in the OTel collector.
-
-Keep private raw traces opt-in with 7-day expiry; retain local patches and evidence 30 days by default and job summaries 90 days. Pinned jobs override expiry explicitly. Protect active and ambiguous-effect artifacts from garbage collection. Delete abandoned workspaces only after process termination and preserved patch verification. Document backup scope and deletion behavior; copying a database without its referenced artifacts is not a complete backup.
+`publication-plan/v1` binds repository, branch, base/head revisions, candidate digest, title, and body. Simulation authorization binds the exact plan digest and expiry. Only the offline fake remote is accepted. Lost responses reconcile by exact target, author, and marker across pages; an uncertain absent effect is not blindly repeated.

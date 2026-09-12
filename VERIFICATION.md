@@ -1,100 +1,57 @@
-# Verification, benchmarks, and improvement
+# Verification record
 
-These are proposed gates, not completed test results. Existing reviewer results are distinguished in [RESEARCH.md](RESEARCH.md).
+Observed September 11, 2026 on macOS with Python 3.12.11, Node 22.22.3, Docker Engine 20.10.16, and Codex CLI 0.153.4. These results describe the tested executions and versions.
 
-## Verification layers
+## Automated checks
 
-1. **Deterministic core:** legal transitions, idempotency conflicts, version/epoch checks, evidence invalidation, budget reservations, retention reachability. Use fake clocks and controlled fault points.
-2. **Process integration:** real SQLite, disposable Git repo, scripted CLI, Docker process tree, bounded stdout/stderr, restart and cancellation. Mocks alone cannot prove cleanup.
-3. **Adapter contracts:** captured sanitized JSONL fixtures plus local fake model/GitHub servers; malformed/truncated events, output limits, blocked exit-zero reviews, unknown usage, API version drift.
-4. **Security boundary:** filesystem canaries, symlinks, hostile repository instructions, credential/environment leakage, blocked network/LAN/control endpoints, malicious dependency scripts, hidden evaluator access. Do not put actual secrets into tests.
-5. **Real task:** candidate-specific trusted tests, independent review, human patch inspection, and later verified PR head. Distinguish baseline failures from introduced failures; a broken baseline does not waive a new regression.
-6. **Independent quality experiment:** agent-eval-k3s runs frozen tasks and graders; the platform emits candidate work and observable evidence.
+The final full local suite passed **76 tests in 78.02 seconds**, using the coding image built from the checked-in Dockerfile: `sha256:a435bf7b4b17dcf41637c32c4ef07bc82d44b7da455f74e4a34ad8cc88a4093f`. Ruff checks and formatting passed. The wheel built and an isolated installation outside the checkout completed its Docker fixture as `ready_local`, including packaged migration and runner resources.
 
-## Required failure scenarios
-
-| Injection | Required observable result |
-|---|---|
-| Crash before/after state-and-effect transaction | Job is absent or complete as a transaction; no half-written transition |
-| Crash after container creation before handle saved | Labeled orphan discovered; no duplicate writer launched |
-| Lease expires while worker still runs | Stale result rejected; old container terminated/quarantined; new workspace separate |
-| Worker forks a child that ignores termination | Container-level kill confirmed before cancellation is terminal |
-| Docker unavailable during cancel | Task remains cancelling/attention, never falsely cancelled |
-| Model response lost or usage missing | Incomplete attempt retained, retry budget charged conservatively; cost unknown shown |
-| Flue returns blocked with exit 0 | Candidate does not pass |
-| Reviewer digest or line membership wrong | Invalid evidence, no clean verdict synthesized |
-| Tests modified to skip failures | Trusted recipe and independent hidden checks still govern acceptance |
-| Candidate changes after tests | All candidate-bound evidence invalidated |
-| GitHub accepted POST, response lost | Reconcile by exact target and marker before any repeat; ambiguity visible |
-| Remote head/base advances | Stale state; no success claim about unverified revision |
-| Concurrent budget reservations | Aggregate reservation never exceeds known allowance |
-| Disk fills or output floods | Bounded termination, retained diagnostic class, no false completion |
-| Malicious repo requests credentials/publication | Capability denial outside model judgment, audited safely |
-| OTel exporter fails | Job remains operable and canonical local evidence remains readable |
-| Backup restored | DB, candidate artifacts, and effect records reconcile without missing-content success |
-| Mac sleeps through deadlines | Resume reconciles running state and expires/pause policy explicitly |
-
-Initial reliability targets are zero accepted stale results and zero duplicate confirmed effects in the fault suite; termination within 15 seconds when Docker is reachable; recovery decision within 60 seconds after healthy service restart. These are test targets, not SLO claims. Real cancellation latency and sleep cases must be measured.
-
-## Benchmark protocol
-
-Compare three versioned modes:
-
-- **A, strong single agent:** same capable coding adapter/model, task, tools, public tests, and resource caps; it may self-check and use the full task budget. No artificial weak prompt or missing verification tools.
-- **B, independent review:** A plus fresh-context Flue review and bounded revision. Review spend comes from the same total budget.
-- **C, selective multi-agent:** B plus at most two read-only specialists under a preregistered routing rule. Include coordinator and specialist spend in the same budget.
-
-Primary causal comparison uses the same model family/version for every role where supported. If Flue or another role cannot run that model, mark the comparison as a deployment configuration comparison, not a clean coordination ablation. Run model/provider diversity as a separate experiment. Pin adapter versions and reasoning settings. Give A the same opportunity to spend the remaining budget on additional reasoning/checks; do not equate agent count with matched compute.
-
-Start with six credential-free fixtures to validate the harness. Then build a 12-task pilot, followed by a frozen 30-task corpus across correctness bugs, test/feature additions, cross-module changes, and concurrency/security behavior. Include Flue, scheduler, and evaluator-style tasks from frozen snapshots plus license-appropriate public fixtures. Keep tightly related tasks in the same split to prevent leakage. Do not fabricate 30 suitable tasks by making trivial variants of one bug. If only the pilot is feasible, report that limitation.
-
-Maintain separate development and hidden holdout splits. Use three independent trials per task and variant initially, paired by task and trial schedule. Randomize/interleave variants to reduce provider/time drift; record model resolution time. Pin image digests, dependency cache state, CPU/RAM/PIDs, network, timeout behavior, and evaluator version. Run one benchmark job at a time on the Mac unless total resource allocation remains matched. A provider retry policy is part of the treatment and must be recorded.
-
-Record at minimum:
-
-| Metric | Definition |
-|---|---|
-| End-to-end acceptance | Accepted tasks / all attempted tasks, including infra failures in the denominator |
-| Conditional quality | Accepted / successfully evaluated attempts, reported beside infra rate |
-| First-pass and repaired acceptance | Separate results before and after feedback; never overwrite first attempts |
-| Reliability | Per-task repeated-trial success frequency; fraction passing every trial |
-| Review usefulness | Confirmed actionable findings, false positives, defects caught before human review |
-| Efficiency | Total tokens, known billed/estimated cost, elapsed time, tool calls, retries, and human intervention |
-| Safety | Unauthorized action attempts and actual effects, stale acceptance, duplicate effects, test tampering |
-| Cost per accepted task | All known cohort spend divided by accepted count; undefined if none; unknown spend stays unknown |
-
-Report per-task paired deltas and task-cluster bootstrap 95% intervals; repeated trials of the same task are not independent new tasks. Include raw denominators and uncertainty. Do not infer a population-level win from a handful of anecdotes. External infra faults get a separate label; if a rerun is warranted, preserve the original and use a preregistered paired rerun policy. Never rerun only the weaker variant until it looks better.
-
-A proposed routing promotion gate: no unauthorized effects, no increase in deterministic critical failures, and either a positive acceptance delta with a lower confidence bound above zero at matched budget, or noninferior acceptance within a preregistered 3-percentage-point margin with at least 15% lower median known cost. Small samples may be inconclusive; that means keep the current route and gather more data. Those numerical margins are initial product choices to freeze before evaluation, not research-established constants.
-
-## Within-task repair loop
-
-Use only public check failures and reviewer findings for runtime repair. Feedback includes exact candidate digest, reproducible command/recipe, bounded output, finding IDs, and a clear success condition. The worker proposes a new candidate or a documented dispute. A repeated identical candidate or repeated unresolved finding triggers attention before wasting the full allowance. Default maximum two repairs; retries cannot reset the counter.
-
-Never reveal hidden tests or golden answers to improve the score on the current task. A policy change, requirement change, or disputed blocking finding requires a separate decision with provenance. Test success and reviewer approval are independent conditions, not votes the coordinator averages.
-
-## Across-task improvement loop
-
-```mermaid
-flowchart LR
-    T[Sanitized run projections] --> D[Failure diagnosis]
-    D --> P[Versioned proposal and hypothesis]
-    P --> V[Visible development evaluation]
-    V --> H[Independent hidden evaluation]
-    H --> G[Fixed promotion gate and human decision]
-    G --> C[Small canary cohort]
-    C --> M[Monitor regressions]
-    M --> R[Promote or roll back]
+```sh
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q
+uv build
 ```
 
-Begin with explicit failure classes: malformed handoff, missed test, stale evidence, reviewer false positive, scope violation, tool timeout, budget exhaustion, and infrastructure fault. Diagnosis should group evidence by policy/adapter version and distinguish application faults from environment faults. A proposal includes recurrence count, example run references, plausible cause, change diff, expected metric movement, affected risks, and rollback version.
+| Area | Observed assertion |
+|---|---|
+| SQLite | Atomic rollback, idempotent admission, payload conflict, stale version/epoch/lease rejection |
+| Coordinator recovery | Twenty crash runs across four boundaries, plus process death, duplicate launch, dual service, and cancellation |
+| Docker | Actual filesystem/environment canaries, blocked network, non-root execution, symlink rejection, resource/output deadlines, descendant termination |
+| Snapshots | Clean-source enforcement, scope enforcement, additions/deletions, content and artifact validation |
+| Flue | Blocked exit-zero response, digest/hunk/schema/severity checks, bounded subprocess I/O |
+| Codex broker | Actual CLI against fake Responses streams, tool execution in the sandbox, host credential canary exclusion, quota termination, receipt reuse |
+| Candidate workflow | Fresh verification, review binding, bounded repairs, stale evidence, interrupted intake after a completed coding receipt |
+| Integration contracts | Candidate/decision substitution, expired authorization, paginated fake-remote reconciliation, lost-response ambiguity |
 
-Version prompt text, tool schemas, routing rules, verification recipes, and adapter configuration independently. Pin them per job. The improvement agent may edit a candidate prompt/tool/routing package and propose new development tests. It may not edit the evaluator executable, hidden corpus, final grader, promotion thresholds, or production default pointer. Proposed graders run in quarantine with reviewed execution limits and are never promoted merely because they approve their own proposal.
+The automated suite makes no paid model calls and writes no GitHub changes. Docker integration checks need a reachable daemon and the prepared coding image. `scripts/smoke_installed.py` checks a wheel installed in a fresh environment outside the checkout. The checked-in CI workflow runs these steps with pinned action revisions; its GitHub-hosted run has not been exercised because the repository has not been pushed.
 
-The evaluator receives the candidate package and runs the held-out comparison from its own immutable configuration. Return aggregate outcomes and permitted diagnostic categories. Do not send hidden answers back to the improvement agent. Repeated adaptive submissions can overfit even aggregate feedback; limit evaluation submissions per change family, keep a final untouched test set, rotate holdouts, and record all rejected proposals.
+## Real repository exercise
 
-Promotion remains an explicit human decision after fixed gates. Start a small, declared canary cohort of new jobs; monitor critical failures, review disagreement, acceptance, cost, and intervention. Roll back the default pointer on a critical regression. Never rewrite completed results or change versions under in-flight jobs. agent-eval-k3s remains independently runnable against any CLI/HTTP target, not dependent on this platform's database or agent framework.
+Source: `pr-review-agent-flue` at `024f477e613de41a23a4b6a8986c735f703bbdae`. Work happened in a content-only disposable workspace. The original checkout and running watcher were preserved.
 
-## Evidence that supports an interview claim
+The candidate binds diff fetching and review publication to captured base/head revisions. It includes the reviewed commit in the publication payload, checks the current revisions before reporting success, validates the published review's commit, and marks stale outcomes explicitly. Completion markers include base and head identity.
 
-An acceptable claim states the measured task count, trial count, versions, resource envelope, and observed improvement or lack of it. A crash recovery demonstration supports the tested recovery behavior, not unlimited availability. A hidden benchmark supports quality on that suite, not enterprise readiness. Preserve negative findings: deciding not to delegate when it costs more without helping is sound engineering evidence.
+Six new race tests use a local fake GitHub server. All six fail against the baseline with only exports added to expose the tested entry points. On the candidate, all **74 tests pass**, together with TypeScript type checking and compilation. A fresh one-shot Flue review of the exact diff returned no findings in 27.872 seconds. A second verification through the candidate workbench passed, and inspection returned `ready_local`.
+
+| Artifact | SHA-256 |
+|---|---|
+| Candidate manifest | `bcfd2e18d55828bb066b4dc583dca3f4e63ba74005a967cf4b87f8c9fc5f88f4` |
+| Binary patch | `fe590d6762e4ec5f89e78f2ab6c6dc737d4c0762567a6b0b87cf6608a69bf102` |
+| Verification image | `cbbec424e7cba35a1a9ff397fc084cb350866275b30976a4e61774aea32aee68` |
+
+The exercise establishes behavior against those fake-server interleavings. It did not publish a review or patch to live GitHub. The patch was prepared during implementation and imported through the workbench; it is not presented as a Codex-generated benchmark result. Artifacts and detailed logs remain in private application state.
+
+## Live coding exercise
+
+A brokered Codex worker fixed a calculator subtraction bug with only `calculator.py` writable. The original test file remained fixed. Five model requests returned HTTP 200, the CLI completed, and a separate credential-free verification container passed the addition test with positive and mixed-sign inputs.
+
+The observed elapsed time was **29.282 seconds**, including independent verification. CLI-reported usage was 28,224 input tokens and 626 output tokens, with cached/reasoning fields preserved in the private receipt. Cost was not reported and remains null. The worker used a Keychain-backed host profile and an external-network-disabled container. Its image was `sha256:9a72f4e1ed563ee949496b0b345c8c47559beef87130c93ab3ae9a49789f1d18`.
+
+This proves the tested gateway/CLI path can produce a candidate. The separate fake-model isolation tests verify the credential, filesystem, network, and quota boundaries without exposing a real credential.
+
+## Evaluation protocol
+
+The independent evaluator will compare a strong single coding worker, independent review with bounded repair, and selective read-only specialists under equal task and budget conditions. Freeze tasks, model configuration, images, recipe, evaluator revision, repetitions, and practical decision thresholds before a run.
+
+Preserve first attempts and repairs separately. Count infrastructure failures in overall attempted-work totals, retain paired task identities, and report missing usage explicitly. Hidden suites and acceptance policy remain outside worker access. Published comparative claims require actual independent results; the exercises above are engineering evidence for their specific workflows.

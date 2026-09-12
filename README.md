@@ -1,31 +1,80 @@
 # Multi-agent software engineering platform
 
-Implementation plan, researched September 11, 2026. **No application is implemented in this folder.** The directory did not exist when inspected and was created for these documents. Existing projects were inspected read-only. No commits, pushes, deployments, or external messages were made.
+Turn a repository task into an inspectable patch, with isolated coding, independent review, and evidence tied to the exact candidate.
 
-Build a local service that takes a repository task, gives an existing coding tool an isolated workspace, verifies its patch, obtains an independent Flue review, allows bounded repairs, and prepares a reviewable pull request. The useful product is reliable execution and inspectable evidence. Additional agents earn their place through measured improvements.
+The platform coordinates a coding worker and a fresh Flue reviewer. Python, SQLite, and Docker handle execution, recovery, and verification. Candidate workspaces contain repository content; model credentials stay on the host in macOS Keychain.
 
-## Recommendation
+## What it does
 
-Start with **Python, Pydantic, Typer, SQLite, a small explicit state machine, and Docker-isolated workspaces**. Use Codex CLI as the initial coding adapter, then Claude Code. Call the existing Flue diff reviewer through its one-shot JSON interface. Keep agent-eval-k3s as the independent evaluation authority. Add read-only specialist delegation after the single-writer workflow works reliably. Revisit Temporal when remote workers or high availability become real requirements; do not combine it with LangGraph in the first release.
+- Runs Codex CLI in a container with external networking disabled. A host broker permits bounded model requests through attached process pipes.
+- Imports or generates patches from clean repository snapshots and enforces an explicit output scope.
+- Runs a pinned verification recipe on a fresh candidate snapshot and validates Flue's verdict against the exact diff.
+- Preserves attempts and receipts, rejects conflicting submission keys, and limits each lineage to two repairs.
+- Exercises coordinator crashes, stale ownership, cancellation, output limits, and uncertain external effects through deterministic fixtures.
 
-This is an ambitious path to a useful personal platform and later a team service. It is not evidence of enterprise readiness. The hardest and most valuable work is recovery, verification independence, safe credentials, and preventing duplicate effects.
+## Get started
 
-## Read these documents
+Use Python 3.12+, uv, Git, and Docker. Coding and Flue review also use Node 22+. The default state directory is `~/Library/Application Support/SWEPlatform`.
 
-| Document | What it answers |
+```sh
+uv sync --frozen
+uv run swe-platform doctor
+uv run swe-platform init
+uv run swe-platform serve
+```
+
+In another terminal, run a fixture job:
+
+```sh
+uv run swe-platform submit --key first-fixture --adapter docker-scripted
+uv run swe-platform status
+uv run swe-platform inspect <job-id>
+```
+
+Restarting `serve` reconciles saved fixture executions. Use `cancel <job-id>` to request termination and inspect its confirmed state.
+
+## Work on a repository
+
+Prepare the [coding image and private gateway profile](IMPLEMENTATION.md#coding-setup), then select a clean source repository, allowed paths, and trusted verification recipe:
+
+```sh
+uv run swe-platform candidate code /path/to/repo recipe.json gateway.json \
+  --key fix-addition --allow src/calculator.py \
+  --task 'Correct addition and run the existing tests'
+
+uv run swe-platform candidate verify <candidate-digest>
+uv run swe-platform candidate review <candidate-digest> /path/to/flue/dist/cli.js gateway.json
+uv run swe-platform candidate inspect <candidate-digest>
+```
+
+`inspect` returns the local patch path, checks, review, and repair count. A current candidate with passing checks and a clear review is `ready_local`. Repeating a completed coding key reuses its saved result. `candidate stop-coding <key>` stops an interrupted coding execution.
+
+To start with an existing patch, use `candidate import /path/to/repo change.patch recipe.json --allow src/calculator.py`. Use `candidate repair <digest> replacement.patch` for a revised patch against the original base. Each revision gets fresh evidence.
+
+## Verified examples
+
+A local Flue watcher candidate reproduced six stale-review races against a fake GitHub server. All six failed against the original code; the candidate passed 74 tests, TypeScript checks, and a fresh Flue review. A live brokered Codex run also fixed a calculator fixture, which passed verification in a separate container. See the [verification record](VERIFICATION.md) for versions, scope, and reproducible checks.
+
+## Project guide
+
+| Document | Contents |
 |---|---|
-| [Research and current evidence](RESEARCH.md) | What exists today, what primary sources support, framework comparisons, and uncertainty |
-| [Architecture and trust boundaries](ARCHITECTURE.md) | Components, workflow, recovery, isolation, deployment, and design decisions |
-| [State and integration contracts](CONTRACTS.md) | Persistent records, handoffs, coding adapters, Flue, evaluator, GitHub, and observability |
-| [Implementation and learning path](IMPLEMENTATION.md) | Mac experience, daily examples, milestones, acceptance criteria, and the first task |
-| [Verification and improvement](VERIFICATION.md) | Fault tests, fair benchmarks, independent grading, and controlled improvement |
+| [Implementation guide](IMPLEMENTATION.md) | Images, recipes, commands, recovery, and development |
+| [Architecture](ARCHITECTURE.md) | Execution, credentials, evidence, and ownership |
+| [Contracts](CONTRACTS.md) | Durable records and adapter interfaces |
+| [Evaluator integration](INTEGRATION.md) | Independent evaluation boundary and proposed exchange format |
+| [Verification](VERIFICATION.md) | Automated checks and observed exercises |
+| [Research](RESEARCH.md) | Source-backed design decisions |
 
-## First useful outcome
+## Development
 
-On a clean snapshot of `pr-review-agent-flue`, ask the platform to prevent stale-head review publication. It should reproduce the race against a fake GitHub server, propose and implement a bounded patch in an isolated workspace, run verification, obtain a fresh Flue verdict, and produce a local patch plus evidence. Later, explicitly authorize pushing its dedicated branch and creating a draft PR. This planning task does not change that repository.
+Build the coding image described in the implementation guide before running the integration tests.
 
-The first implementation task is smaller: [build the credential-free durable execution skeleton](IMPLEMENTATION.md#first-implementation-task). Prove that killing and restarting the coordinator does not lose a job or launch a second writer. Do that before spending model tokens.
+```sh
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q
+uv build
+```
 
-## What success will look like
-
-Chris uses it on actual repositories, can inspect why a job stopped, resumes after a crash without overlapping writers, and reviews a patch with tests tied to its exact content. A published benchmark then establishes whether independent review and selective delegation improve accepted results per budget. A good interview demonstration is a crash and recovery, an intentionally rejected patch, and a measured comparison, not a screen full of agents talking.
+The test suite uses local fixtures, fake model responses, and disposable containers. Live model exercises are separate from the automated suite.

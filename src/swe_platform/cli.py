@@ -13,6 +13,7 @@ from .broker.host import AgentRun, HostGateway
 from .candidates import Recipe, Workbench
 from .coding import CandidateCoding
 from .credentials import GatewayProfile
+from .github_publication import Publisher
 from .io import lock
 from .models import Submission
 from .service import request
@@ -33,6 +34,10 @@ workflow_app = typer.Typer(
     no_args_is_help=True, help="Orchestrate Flue coding, checks, review, and repairs"
 )
 app.add_typer(workflow_app, name="workflow")
+publication_app = typer.Typer(
+    no_args_is_help=True, help="Prepare, publish, and reconcile draft PRs"
+)
+app.add_typer(publication_app, name="publication")
 DEFAULT_STATE = Path.home() / "Library/Application Support/SWEPlatform"
 
 
@@ -254,3 +259,49 @@ def inspect_workflow(ctx: typer.Context, key: str):
 def cancel_workflow(ctx: typer.Context, key: str):
     """Stop the active stage and persist a cancellation request."""
     emit(Workflow(ctx.obj).cancel(key))
+
+
+def publisher(root, workflow):
+    return Publisher(Workflow(root).directory(workflow) / "evidence" if workflow else root)
+
+
+@publication_app.command("prepare")
+def prepare_publication(
+    ctx: typer.Context,
+    candidate: str,
+    repository: str = typer.Option(...),
+    branch: str = typer.Option(...),
+    title: str = typer.Option(...),
+    body_file: Path = typer.Option(...),
+    base_branch: str | None = None,
+    workflow: str | None = None,
+):
+    """Prepare an exact publication plan using read-only GitHub checks."""
+    emit(
+        publisher(ctx.obj, workflow).prepare(
+            candidate,
+            repository,
+            branch=branch,
+            title=title,
+            body=body_file.read_text(),
+            base_branch=base_branch,
+        )
+    )
+
+
+@publication_app.command("inspect")
+def inspect_publication(ctx: typer.Context, plan: str, workflow: str | None = None):
+    """Show the approved content, remote receipts, and exact-head check results."""
+    emit(publisher(ctx.obj, workflow).inspect(plan))
+
+
+@publication_app.command("publish")
+def publish_candidate(ctx: typer.Context, plan: str, workflow: str | None = None):
+    """Approve this exact plan and publish its candidate as a draft pull request."""
+    emit(publisher(ctx.obj, workflow).publish(plan))
+
+
+@publication_app.command("reconcile")
+def reconcile_publication(ctx: typer.Context, plan: str, workflow: str | None = None):
+    """Read GitHub to reconcile saved writes and refresh checks without creating remote objects."""
+    emit(publisher(ctx.obj, workflow).publish(plan, reconcile_only=True))

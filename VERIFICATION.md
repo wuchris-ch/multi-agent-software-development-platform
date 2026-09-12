@@ -4,11 +4,14 @@ Observed September 11, 2026 with Flue runtime 2.0.3, Node 22.22.3, Python 3.12.1
 
 ## Automated checks
 
-[CI at `04ef086`](https://github.com/wuchris-ch/multi-agent-software-development-platform/actions/runs/34664403099) passed **90 Python tests in 67.61 seconds**, the Node provider test, lint, formatting, package build, and an installed-wheel Docker smoke test. The installed package completed its fixture as `ready_local` outside the source checkout.
+[CI at `73777f8`](https://github.com/wuchris-ch/multi-agent-software-development-platform/actions/runs/34675704324) passed **153 Python tests in 92.76 seconds**, **eight React tests**, the Node provider test, TypeScript checking, lint, formatting and package build. The installed wheel completed its Docker fixture outside the checkout, served the packaged console over authenticated HTTP and verified all seven pinned evaluator schemas.
 
 ```sh
 npm ci --ignore-scripts
 npm test
+npm --prefix web ci --ignore-scripts
+npm --prefix web test
+npm --prefix web run build
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest -q
@@ -16,6 +19,8 @@ uv build
 ```
 
 The Docker integration tests run the actual Flue runtime against controlled model responses. They exercise tool execution, review, repair, cancellation, and recovery without paid model requests or GitHub writes.
+
+CI also runs the [process-recovery replay](examples/README.md) twice. A real process exits after its coding receipt; a fresh process reuses that receipt, repairs a failing public check and completes review. The completed replay stays at five fixture requests and exports the same verified evidence bundle on repetition. Selective-mode integration checks exercise two concurrent read-only specialists and one coding agent. Policy tests enforce frozen initial pairs, reserved held-out families and generation-fenced rollback.
 
 | Area | Observed assertion |
 |---|---|

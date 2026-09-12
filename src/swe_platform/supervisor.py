@@ -73,7 +73,9 @@ class Supervisor:
                 pid = json.loads(receipt.read_text())["pid"]
                 # Never kill a reused PID based only on a historical numeric handle.
                 ps = subprocess.run(
-                    ["ps", "-p", str(pid), "-o", "command="],
+                    # Linux ps truncates long commands by default, including the execution
+                    # path used to guard against PID reuse. Request the complete argv.
+                    ["ps", "-ww", "-p", str(pid), "-o", "command="],
                     capture_output=True,
                     text=True,
                     timeout=2,

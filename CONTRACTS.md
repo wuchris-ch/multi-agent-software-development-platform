@@ -35,19 +35,27 @@ Candidate intake accepts an existing binary patch or a completed isolated coding
 
 The original key is saved for control-panel operations. A short dispatch lock serializes stage admission with cancellation. Resume restores the active stage before continuing its operation. Cancellation is confirmed only after active execution termination; no active coordinator is required to cancel an inactive job.
 
+Model-request reservations are committed before stage dispatch. A completed receipt replaces its reservation with the observed request count. An uncertain attempt keeps the reservation. Reusing the key with a changed policy rejects; resuming the same job cannot reset the budget or deadline.
+
+Coding and review use separate Flue agent executions. Verification is deterministic. Passing checks and a validated clear review establish `ready_local`. Single mode stops at `verified_local` with public verification and no review receipt. Failed checks or a blocking review can lead to a bounded repair.
+
+| Record | Binding |
+|---|---|
+| `development-policy/v1` | Coordination mode, stage request ceilings, specialist count and coding guidance |
+| `development-plan/v1` | Exact input snapshot, scoped implementation steps and disjoint specialist assignments |
+| `development-analysis/v1` | Specialist identity, assigned source files and snapshot, findings and recommendation |
+| `model-ledger/v1` | Global request/token/deadline limits, each admitted call, conservative charge and reported usage |
+| `development-trace/v1` | Workflow and policy identity, linked stage/model/tool observations and publication events |
+
 ## GitHub publication
 
 `github-publication-plan/v1` pins repository and actor identities, base and new branch, locally computed Git tree/commit, candidate and evidence digests, PR text and a 24-hour expiration. Its canonical digest is the approval token. A durable publication journal records branch and PR intents, receipts, reconciliation events and checks tied to the remote head.
 
 POST `/api/workflows/{id}/publications` prepares a plan. POST `.../{plan}/publish` requires the same `plan_sha256` in its body. POST `.../{plan}/reconcile` performs remote reads only. All mutations require an operator token; viewers may inspect evidence and download bundles.
 
-Model-request reservations are committed before stage dispatch. A completed receipt replaces its reservation with the observed request count. An uncertain attempt keeps the reservation. Reusing the key with a changed policy rejects; resuming the same job cannot reset the budget or deadline.
-
-Coding and review use separate Flue agent executions. Verification is deterministic. Passing checks and a validated clear review establish `ready_local`. Failed checks or a blocking review can lead to a bounded repair. Cancellation prevents new stages and requires confirmation that active execution stopped. Interrupted dispatch without a receipt requires reconciliation.
-
 ## Agent broker
 
-A request frame contains exactly `type`, `id`, `path`, and a base64 body. The only model path is `/v1/chat/completions`. IDs must be unique within the attempt. The host pins the configured model and charges the request allowance before dispatch. Coding permits only Flue's read, write, edit, bash, grep, and glob tools; review permits no tools. Both outgoing tool definitions and incoming tool calls are checked. Unknown capabilities, transport fields, and remote media reject.
+A request frame contains exactly `type`, `id`, `path`, and a base64 body. The only model path is `/v1/chat/completions`. IDs must be unique within the attempt. The host pins the configured model and charges the request allowance before dispatch. Coding permits only Flue's read, write, edit, bash, grep, and glob tools. Planning and analysis permit read, grep and glob; review permits no tools. Both outgoing tool definitions and incoming tool calls are checked. Unknown capabilities, transport fields, and remote media reject.
 
 Replies carry an ID, HTTP status, content type, and bounded base64 data. A worker emits a startup handshake and a terminal envelope. The `flue-result/v1` collector requires the expected role, submission identity, completed status, nonempty final message, valid usage, and successful process exit. Incomplete or malformed output rejects. Dollar cost remains null when unreported.
 
@@ -59,8 +67,20 @@ The built-in Flue reviewer consumes the complete exact diff and its digest in a 
 
 Standalone review receipts bind the selected runtime, image, gateway identity, and budget. Workflow review belongs to that job's isolated evidence namespace. A legacy external raw-diff adapter remains available internally for historical integration fixtures; it is not required by the current workflow or CLI.
 
-## Evaluation and publication
+## Independent evaluation
 
-`swe-platform.evaluation-proposal/v1` and `swe-platform.decision-binding/v1` are local evidence-binding fixtures. Validation binds issued execution identity, artifacts, candidate, policy, and evaluator revision. These intentionally use separate names from the evaluator's evolving wire schemas. A future bridge must authenticate origin and translate the differences recorded in [INTEGRATION.md](INTEGRATION.md), including candidate revisions and registered JSON artifact storage.
+The producer ships pinned `agent-eval` v2 JSON schemas and an authenticated adapter. Trial tickets bind the task family, split, repetition, arm, production recipe, base and evaluator authority before model dispatch. Candidate bytes are registered before the evaluator issues an exact execution contract. Immutable submissions bind the contract, candidate artifacts and producer usage. Intake is `awaiting_independent_evaluation` until an authenticated assessment matches every identity.
 
-`publication-plan/v1` binds repository, branch, base/head revisions, candidate digest, title, and body. Simulation authorization binds the exact plan digest and expiry. Only the offline fake remote is accepted. Lost responses reconcile by exact target, author, and marker across pages; an uncertain absent effect is not blindly repeated.
+The producer can upload artifacts, submit a candidate and retrieve its assessment. It cannot issue evaluator authority or grade its own output. Reserved workflows require a passing current assessment for publication. See the [wire lifecycle and pinned protocol control](INTEGRATION.md).
+
+## Policy rollout
+
+`development-promotion-gate/v1` declares paired initial trials and disjoint development and held-out families. A complete `development-policy-comparison/v1` records every pair and its exact assessment. Missing pairs remain incomplete; regressions reject. Assisted tickets remain separate, and initial recipes disable internal repair.
+
+`development-policy-proposal/v1` binds recurring development failures to a candidate policy. `development-policy-rollout/v1` records the active policy, monotonically increasing generation and audit events. Promotion and rollback compare both expected policy and generation. A console launch selecting the active policy freezes that policy in its persisted request.
+
+## Simulation contracts
+
+`swe-platform.evaluation-proposal/v1` and `swe-platform.decision-binding/v1` exercise local evidence substitution and authority checks. They are separate from the production v2 wire adapter.
+
+The fixture `publication-plan/v1` binds repository, branch, base/head revisions, candidate digest, title, and body against an offline fake remote. The real GitHub publisher uses `github-publication-plan/v1`, described above.

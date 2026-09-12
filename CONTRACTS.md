@@ -4,7 +4,7 @@ The executable models and adapters are authoritative. Persisted JSON uses canoni
 
 ## Fixture service
 
-`models.Submission` v1 contains a submission key, task description, adapter (`scripted` or `docker-scripted`), deadline, fixture delay, and behavior. Task text is descriptive for these deterministic fixtures; arbitrary repository coding uses `candidate code`.
+`models.Submission` v1 contains a submission key, task description, adapter (`scripted` or `docker-scripted`), deadline, fixture delay, and behavior. Task text is descriptive for these deterministic fixtures; repository tasks use `workflow run` or `candidate code`.
 
 SQLite stores jobs, attempts, ordered events, and effects. A duplicate key with identical normalized payload returns the same job. A conflicting payload rejects. Updates compare job version and, where applicable, owner, epoch, and lease. A state transition and its effect intent are one transaction.
 
@@ -27,19 +27,27 @@ Candidate keys identify immutable content. Workflow journals identify activity a
 
 Candidate intake accepts an existing binary patch or a completed isolated coding result. New and deleted files are represented explicitly. Repair input is a replacement patch against the original base, rather than a patch against the previous candidate.
 
-## Coding broker
+## Development workflow
 
-A request frame contains exactly `type`, `id`, `path`, and a base64 body. The only path is `/v1/responses`. IDs must be unique within the attempt. The host replaces the requested model with trusted configuration and charges the request allowance before dispatch. Hosted tools, arbitrary transport fields, remote media, and cross-request response handles reject.
+`development-workflow/v1` binds the source snapshot, task, allowed paths, recipe, runtime image, coding/review profile identities, absolute deadline, shared request cap, and repair limit to one key. Its journal contains ordered events, named stage intents and results, the active execution, and candidate lineage.
 
-Responses carry an ID, status, content type, and bounded base64 data. The Codex JSONL collector requires a successful exit, a final agent message, and a completed turn. Truncated streams, explicit errors, malformed usage, and events after completion reject. Dollar cost remains null when unreported.
+Model-request reservations are committed before stage dispatch. A completed receipt replaces its reservation with the observed request count. An uncertain attempt keeps the reservation. Reusing the key with a changed policy rejects; resuming the same job cannot reset the budget or deadline.
 
-An attempt with intent but no durable receipt is ambiguous. It is never automatically replayed. `candidate stop-coding` terminates its container; an intentional new invocation uses a new key. A durable receipt can complete candidate intake without another model call.
+Coding and review use separate Flue agent executions. Verification is deterministic. Passing checks and a validated clear review establish `ready_local`. Failed checks or a blocking review can lead to a bounded repair. Cancellation prevents new stages and requires confirmation that active execution stopped. Interrupted dispatch without a receipt requires reconciliation.
 
-## Flue
+## Agent broker
 
-The existing raw-diff CLI consumes exact diff bytes on stdin. Its v1 verdict includes `input_sha256`, `risk`, `blocked`, findings, and rationale. The adapter verifies the input digest and finding locations against changed lines. Malformed, oversized, inconsistent, or blocked output cannot establish a clear review.
+A request frame contains exactly `type`, `id`, `path`, and a base64 body. The only model path is `/v1/chat/completions`. IDs must be unique within the attempt. The host pins the configured model and charges the request allowance before dispatch. Coding permits only Flue's read, write, edit, bash, grep, and glob tools; review permits no tools. Both outgoing tool definitions and incoming tool calls are checked. Unknown capabilities, transport fields, and remote media reject.
 
-The trusted Flue process receives only its model environment keys and a fresh home. Credential values, raw provider diagnostics, and worker prompts are not included in candidate review receipts.
+Replies carry an ID, HTTP status, content type, and bounded base64 data. A worker emits a startup handshake and a terminal envelope. The `flue-result/v1` collector requires the expected role, submission identity, completed status, nonempty final message, valid usage, and successful process exit. Incomplete or malformed output rejects. Dollar cost remains null when unreported.
+
+An attempt with intent but no durable receipt is ambiguous and is never automatically replayed. `candidate stop-coding` or `workflow cancel` terminates its container. A completed receipt can finish candidate intake without another model call. Runtime and image identity are part of the request; changing runtimes does not silently reinterpret an old execution key.
+
+## Review evidence
+
+The built-in Flue reviewer consumes the complete exact diff and its digest in a fresh conversation. Its v1 verdict contains `input_sha256`, `risk`, `blocked`, findings, and rationale. Findings must point to changed lines. Malformed, oversized, inconsistent, or blocked output cannot establish a clear review.
+
+Standalone review receipts bind the selected runtime, image, gateway identity, and budget. Workflow review belongs to that job's isolated evidence namespace. A legacy external raw-diff adapter remains available internally for historical integration fixtures; it is not required by the current workflow or CLI.
 
 ## Evaluation and publication
 

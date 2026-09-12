@@ -1,68 +1,70 @@
 # Architecture
 
-The implementation separates coordination, candidate production, and acceptance evidence. A model can propose a patch; it cannot certify the result or acquire publication authority.
+Flue owns agent execution. A deterministic coordinator owns the development workflow. The model gateway supplies LLM access to both agent roles. Docker supplies disposable execution environments, and content-addressed artifacts bind every check and review to an exact candidate.
 
 ```mermaid
-flowchart LR
-    CLI[Candidate CLI] --> S[Private content snapshot]
-    S --> C[Codex in Docker]
-    C <-->|Attached process pipes| B[Host model broker]
-    B --> M[Configured model endpoint]
-    C --> A[Sealed candidate and patch]
-    A --> V[Fresh verification container]
-    A --> F[One-shot Flue reviewer]
-    V --> E[Candidate evidence]
-    F --> E
-    E --> I[Inspect local result]
+flowchart TD
+    T[Repository task] --> W[Durable workflow coordinator]
+    W --> S[Frozen source snapshot]
+    S --> C[Flue coding agent]
+    C --> P[Sealed candidate]
+    P --> V[Fresh verification environment]
+    V -->|passing checks| R[Independent Flue review agent]
+    R -->|clear verdict| D[Reviewed local patch]
+    V -->|failed checks| F[Bounded repair feedback]
+    R -->|blocking findings| F
+    F --> C
+    W <--> J[Stage journal and shared budget]
+    C <--> B[Model broker]
+    R <--> B
+    B <--> G[Configured model gateway]
 ```
 
-## State and execution ownership
+## Agent runtime and roles
 
-The fixture service uses SQLite WAL with full synchronous durability and short `BEGIN IMMEDIATE` transactions. Job transitions, events, and dispatch intents commit together. An exclusive OS lock permits one coordinator for a state directory. Local commands communicate through a private Unix socket.
+The TypeScript/JavaScript agent package uses `@flue/runtime` 2.0.3. `CodingAgent` and `ReviewAgent` are registered Flue agents, invoked with `start`, `init`, `dispatch`, and `read`. The coding agent uses Flue's sandbox tools inside the worker container. The reviewer receives the complete candidate diff in a fresh conversation and has no tools. Both roles use a registered provider through the same model broker; each can select its own configured model.
 
-Each fixture attempt has a durable execution ID, ownership epoch, and lease. Completion checks reject stale ownership. Restart adopts the same recorded execution under the service lock. A persisted start receipt and execution lock prevent duplicate fixture writers. A replacement execution is not inferred from an expired lease or missing process alone.
+The default workflow does not spend a model call choosing which stage to run. Its transitions are fixed: implement, verify, review, then either finish or repair. The coding agent can revise its implementation strategy as new evidence arrives. Further specialists can be added as bounded roles when evaluation establishes a benefit.
 
-Repository candidate stages currently use private file journals and per-key locks. Coding intent precedes dispatch; a receipt precedes candidate intake. Verification and review retain their own intents and receipts. This keeps each stage independently inspectable and resumable. A unified job view over these candidate stages is the next coordination step.
+The Flue runtime owns each agent's conversation and tool loop. The Python coordinator owns cross-stage policy, checkpoints, resource accounting, and exact-content acceptance. Snapshot, verification, and artifact services remain ordinary deterministic code. There is no coding-CLI dependency or second agent framework.
 
-Artifacts are content-addressed SHA-256 objects written by fsync and atomic rename. Reads verify the digest. Candidate manifests bind the original revision, content tree, changed paths, and binary patch. Evidence refers to the sealed candidate, and inspection rejects changed recipes or mismatched review digests.
+This follows Flue's distinction between [agent execution and durable workflows](https://flueframework.com/docs/guide/workflows/). The installed runtime source and integration tests establish the behavior used here; documentation alone is not treated as runtime verification.
 
-## Workspace boundary
+## Durable workflow state
 
-Snapshot preparation reads regular committed blobs from a clean repository. It creates a private content tree and Git index without copying repository history, hooks, credential helpers, or local configuration. The source checkout stays untouched. The private Git metadata is never mounted into a coding container.
+Each workflow key owns a private job directory, an immutable source snapshot, a stage journal, an agent execution directory, and candidate evidence. An exclusive file lock permits one active coordinator for that key. Atomic fsync-and-rename writes commit requests, stage intents, receipts, events, and the current candidate lineage.
 
-The worker receives a read-only input manifest and a fixed runner. Its writable filesystem is disposable tmpfs. After execution, the host accepts only bounded regular-file output for explicit allowed paths and reconstructs it in the private candidate tree. Symlinks and unsupported modes reject. Existing files outside the allowed scope must remain unchanged; additional generated files outside the scope are discarded.
+A stage reserves its model-request allowance before dispatch. Completed stages account for actual requests; an interrupted stage without a receipt retains its reservation. Coding and review share one job budget and one absolute deadline. Resuming cannot reset either. Each task permits at most two repairs.
 
-Verification starts from a fresh copy of the sealed candidate using a separately pinned recipe. Worker reports and exit codes are descriptive; this independent invocation establishes public-check evidence. Required test files should stay outside the allowed editing scope. Hidden checks remain the evaluator's responsibility.
+Agent intent precedes execution. A completed agent receipt can finish candidate intake after a coordinator interruption, and completed workflow stages return their saved results. An interrupted model dispatch without a durable result is not automatically replayed. Each Flue attempt is a fresh process-lifetime conversation; recovery here reuses stage receipts rather than claiming to resume an arbitrary interrupted model/tool exchange.
 
-## Model and credential boundary
+The coordinator retains all attempts, marks superseded candidates stale, and rejects repeated repair candidates. A candidate becomes `ready_local` only after fresh public checks pass and a valid independent review is clear. The original repository is never an agent workspace.
 
-The trusted host reads a Keychain credential and fixed gateway profile. A short-lived Node transport receives its request through an anonymous pipe and calls the configured HTTPS Responses endpoint. Redirects are rejected. Upstream failure bodies are replaced with a generic error, and returned model metadata uses the worker alias.
+The existing fixture service remains available for supervisor testing. It uses SQLite WAL transactions, execution epochs, leases, and durable effect intents to exercise crash recovery and stale ownership separately from repository workflows.
 
-The worker container has `--network none`. A loopback HTTP server inside it translates Codex requests to bounded protocol frames on stdout and receives replies on stdin. The host validates every frame as untrusted, including frames that repository code could forge. It permits only Responses requests to the fixed model, enforces request/output/deadline allowances, disables storage and cross-response handles, and rejects hosted tools and remote media references. It never dispatches worker-requested host tools or arbitrary URLs.
+## Execution and provider boundaries
 
-Codex runs with an empty private home and explicit configuration. Hosted search, subagents, plugins, hooks, apps, browser use, and image generation are disabled. Its own sandbox bypass is used only inside the external Docker boundary. No CLI auth directory, host home, SSH agent, Docker socket, or evaluator files are mounted. Model request frames are not written to Docker logs.
+The host resolves a trusted gateway profile. Credentials can come from an explicitly named environment variable or a platform credential store. They are not repository configuration and are never placed in worker input, model context, or exported artifacts.
 
-| Resource | Coding | Verification |
-|---|---|---|
-| User | 65534:65534 | 65534:65534 |
-| Network | None, with in-container loopback broker | None |
-| CPU | 1 | 1 |
-| Memory | 512 MiB | 256 MiB |
-| PIDs | 96 | 64 |
-| Root filesystem | Read-only | Read-only |
-| Writable work directory | 64 MiB tmpfs | 64 MiB tmpfs |
-| Privileges | Drop all capabilities, no-new-privileges | Same |
+The worker container has no external network access. An internal loopback bridge carries bounded Chat Completions frames over attached process pipes to the host broker. The broker pins the endpoint and model, enforces request/output/deadline limits, and rejects remote media and undeclared tools. It validates returned tool calls too, so a response cannot invoke Flue built-ins outside the selected role. Upstream errors are sanitized and worker-visible model metadata uses an alias.
 
-Container state establishes termination. Cancellation is serialized against startup and records a tombstone. A killed CLI or attach process alone is insufficient evidence that its descendants stopped. When Docker is unreachable, termination remains unconfirmed.
+| Capability | Coding agent | Review agent | Verification |
+|---|---|---|---|
+| Model access | Bounded broker | Bounded broker | None |
+| Repository access | Disposable content snapshot | Supplied diff only | Sealed candidate snapshot |
+| Tools | Read, write, edit, bash, grep, glob | None | Fixed recipe argv |
+| Output | Explicit allowed paths | Validated verdict | Exit status and check output |
+| Network | None | None | None |
+| Identity | Non-root | Non-root | Non-root |
 
-## Review and repairs
+All execution containers use a read-only root filesystem, temporary work storage, dropped capabilities, and resource limits. Source Git history, hooks, SSH agents, Docker sockets, host credentials, and evaluator data are not mounted. Worker output is collected through bounded channels, checked for regular files and allowed paths, and reconstructed by the host.
 
-The Flue adapter invokes the existing trusted raw-diff CLI in a fresh host process with an allowlisted model environment. It never starts the watcher. Digest, schema, severity, blocking status, size, and changed-line membership are validated. A valid blocked verdict exits zero in Flue; the adapter reads the verdict rather than equating exit zero with acceptance.
+Cancellation writes a tombstone before stopping the active container. Startup and cancellation share execution ownership; concurrent cancellation requests serialize. The coordinator confirms container termination before recording cancellation as complete. An unavailable daemon leaves termination unconfirmed.
 
-A candidate is `ready_local` only when its pinned public checks pass, its review is clear, and it is current in its lineage. Two replacement patches are permitted. Each gets a new digest and fresh evidence; repeated candidates reject. A saved review intent without a receipt requires reconciliation before another billable invocation.
+## Verification, review, and acceptance
 
-## Independent integration
+Each candidate manifest binds the original revision, content tree, changed paths, and binary patch. Artifacts are SHA-256 addressed and verified on read. Public checks run in a new container from the sealed candidate using the recipe frozen at admission. Test files stay outside the coding scope unless explicitly allowed.
 
-The evaluator owns frozen suites, grading, hidden checks, and comparative decisions. This platform has substitution tests for the proposed exchange contract, described in [INTEGRATION.md](INTEGRATION.md). The active evaluator implementation is rechecked before connecting a live API.
+Review output must match the exact patch digest and schema. Findings must reference changed lines, and severity must agree with the risk and blocking decision. Exit zero alone never establishes acceptance. Repairs start from the preceding candidate, receive only public-check and review feedback, and produce a new patch against the original baseline.
 
-Publication currently has an offline exact-candidate plan and fake-remote reconciliation contract. It exercises pagination, stale revisions, duplicate matches, and lost responses. A live publisher and external authorization workflow are subsequent components. Candidate commands deliver local artifacts.
+The independent evaluator owns hidden suites, grading policy, and comparisons. Its contract is tracked in [INTEGRATION.md](INTEGRATION.md). Publication is a separate capability: local workflows produce inspectable patches, while live GitHub publication currently uses trusted operator commands. The offline publication adapter exercises exact-candidate authorization and ambiguous remote effects before a live publisher is introduced.

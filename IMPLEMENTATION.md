@@ -1,34 +1,39 @@
 # Implementation guide
 
-The CLI supports restartable fixture jobs through `serve`, and repository candidates through `candidate`. Both keep state outside source checkouts. Run `uv run swe-platform --help` and `uv run swe-platform candidate --help` for the installed command surface.
+`workflow run` orchestrates a repository task through Flue coding, fresh checks, independent Flue review, and bounded repairs. `candidate` commands expose the same primitives for individual stages. State stays outside the source checkout.
 
-## Coding setup
+## Agent setup
 
-Build the trusted worker image from the pinned Node base and Codex CLI 0.153.4:
+Build the locked agent package in its execution image:
 
 ```sh
-docker build -t swe-platform-codex:local -f containers/codex.Dockerfile containers
-export SWE_PLATFORM_CODING_IMAGE="$(docker image inspect swe-platform-codex:local --format '{{.Id}}')"
+uv sync --frozen
+docker build -t swe-platform-flue:local -f containers/flue.Dockerfile .
+export SWE_PLATFORM_AGENT_IMAGE="$(docker image inspect swe-platform-flue:local --format '{{.Id}}')"
 ```
 
-Execution requires an immutable image digest. The environment variable selects the locally built image; `candidate code --image sha256:...` selects it per invocation. Node and Codex are pinned in the Dockerfile. OS packages resolve during the build, so record the resulting image ID when comparing runs. Image preparation uses registry access; execution containers use `--network none`.
+The image pins Node and installs the committed npm lockfile, including Flue 2.0.3. Execution requires an immutable image digest, selected by `SWE_PLATFORM_AGENT_IMAGE` or `--image`. Record the resulting digest when comparing runs. No external coding CLI or separate review repository is required.
 
-Create a private gateway profile outside source checkouts, with mode `600`. The credential belongs in macOS Keychain under the profile's service name:
+## Model gateway
+
+Keep gateway profiles outside source checkouts. Use a gateway that supports the Chat Completions API and the selected model's tool calling. A profile names the endpoint, model, and an explicit credential source:
 
 ```json
 {
   "schema_version": "gateway-profile/v1",
   "base_url": "https://gateway.example.invalid/v1",
   "model": "configured-model-id",
-  "keychain_service": "configured-keychain-service"
+  "api_key_env": "MODEL_GATEWAY_API_KEY"
 }
 ```
 
-The host resolves the credential and passes it to a trusted HTTP transport through an anonymous pipe. The worker sees a loopback endpoint and the model alias `worker`. Coding needs a compatible Responses endpoint; Flue uses its existing supported transport. Repository files do not choose privileged endpoints or recipes.
+Supply the named environment variable through your normal secrets configuration. On macOS, a profile can instead use `"keychain_service": "configured-service"`; select exactly one credential source. Existing Keychain profiles remain supported. Credentials are resolved by the trusted host transport, not by agents or repository code.
 
-## Verification recipes
+Use `--review-profile review-gateway.json` to select a different model for review. Without it, both roles use the supplied gateway profile. The agent definitions and workflow policy do not depend on a particular model vendor.
 
-Prepare dependencies in a trusted image before execution. A Python example is:
+## Verification recipe
+
+Prepare dependencies in a trusted image before execution. A Python recipe is:
 
 ```json
 {
@@ -39,42 +44,63 @@ Prepare dependencies in a trusted image before execution. A Python example is:
 }
 ```
 
-Recipes are fixed at intake and stored separately from worker files. Tests run in a fresh container from the sealed candidate. Repository tests are public checks; exclude them from the writable scope when they must remain unchanged. Independent acceptance belongs to the evaluator.
+Recipes are frozen when the job is admitted. Each candidate is tested in a fresh environment. Exclude the test files from allowed coding paths when they must remain fixed. Hidden acceptance checks stay outside the workflow and its agent snapshots.
 
-## Candidate commands
+## Workflow commands
+
+```sh
+uv run swe-platform workflow run /path/to/repo recipe.json gateway.json \
+  --key fix-pagination --allow src/pagination.py \
+  --task 'Fix the reported pagination failure and run the public checks' \
+  --timeout 600 --max-requests 30 --max-repairs 2
+uv run swe-platform workflow inspect fix-pagination
+uv run swe-platform workflow cancel fix-pagination
+```
+
+Repeat the identical run command to resume. A reused key with different task, scope, image, gateway identity, or budget is rejected. The initial source snapshot remains the baseline even if the original checkout later advances.
+
+Coding stages reserve up to 12 requests, review stages up to two, within the shared job cap. Each request has an output-token limit of 4,096. Unused reservations are released after a saved result; unresolved requests remain reserved. Cost is null when the gateway does not report it. The workflow keeps one absolute deadline across stages and restarts.
+
+A repair receives the previous candidate and the public-check output or blocking review, with bounded feedback. It does not receive hidden tests. After the configured repair count, a still-blocked task becomes `needs_attention`.
+
+## Individual stages
 
 ```sh
 uv run swe-platform candidate import /path/to/repo change.patch recipe.json --allow src/example.py
 uv run swe-platform candidate code /path/to/repo recipe.json gateway.json \
-  --key example-fix --allow src/example.py --task 'Fix the reported failure' \
-  --timeout 180 --max-requests 12
+  --key example-fix --allow src/example.py --task 'Fix the reported failure'
 uv run swe-platform candidate verify <digest>
-uv run swe-platform candidate review <digest> /path/to/flue/dist/cli.js gateway.json
+uv run swe-platform candidate review <digest> gateway.json
 uv run swe-platform candidate inspect <digest>
 uv run swe-platform candidate repair <digest> replacement.patch
 ```
 
-Sources must be clean. Snapshots include committed regular files, with an 8 MiB input ceiling. Symlinks, submodules, Git LFS pointers, and tracked `.env` files are rejected. The original checkout is never the worker's workspace. Model output is limited to 256 KiB across allowed paths; other generated files are discarded. Changes to existing files outside the scope are rejected.
+Sources must be clean. Snapshots accept regular committed files, with an 8 MiB input ceiling. Symlinks, submodules, Git LFS pointers, and tracked `.env` files are rejected. Candidate output is limited to 256 KiB across the allowed paths. Review receives a complete bounded diff; oversized input is rejected rather than silently truncated.
 
-Coding defaults to 180 seconds, 12 requests, and at most 4,096 output tokens per request. Requests rejected by the gateway consume the request allowance. Usage is recorded when the CLI supplies it; `cost_usd: null` means unreported cost. Repairs are replacement patches against the original base. A lineage allows two repairs, rejects repeated candidates, and marks earlier candidates stale.
+Workflow candidates live under that workflow's evidence namespace. Use `workflow inspect` to locate their patch and evidence; standalone candidate commands use the top-level candidate namespace.
 
 ## Recovery
 
-| Situation | Action and behavior |
+| Situation | Behavior |
 |---|---|
-| Coordinator stopped during a fixture job | Restart `serve` with the same state. The supervisor reconciles its saved attempt. |
-| Coding has a durable receipt | Repeat the same command and key. Saved output is reused, including after interruption during candidate intake. |
-| Coding dispatch has no receipt | Run `candidate stop-coding <key>`. Inspect retained private state; use a new key for an intentional new attempt. |
-| Review intent has no verdict | Reconcile the invocation before another billable call. The command will not silently repeat it. |
-| Verification interrupted | Repeat `candidate verify`. The labeled container is collected or adopted; saved receipts are reused. |
-| Docker unavailable during cancellation | Restore daemon access and repeat cancellation. A stopped attach process alone is not confirmation. |
+| Completed workflow or stage | The same key reuses saved results without another model call. |
+| Coding result saved before intake interruption | Resume seals the saved output and continues verification. |
+| Agent intent without a result | Reconcile or cancel before starting an intentional new attempt under a new key. |
+| Verification interrupted | The labeled execution is adopted or collected; it is not replaced blindly. |
+| Cancel while an agent or checks are running | Persist the request, stop the active container, prevent subsequent stages, and confirm termination. |
+| Docker unavailable | Report unconfirmed termination and retain the stage intent. |
 
-Run `uv run pytest -q tests/test_recovery.py tests/test_broker.py tests/test_workbench.py` for recovery exercises. Fixture fault points cover intent persistence, worker launch, artifact persistence, and final completion. Coding recovery uses durable stage receipts rather than replaying a model conversation.
+The fixture service still supports `serve`, `submit`, `status`, and `cancel` for deterministic supervisor and SQLite recovery tests. It is separate from the repository workflow command.
 
-## Development checkpoints
+## Development
 
-Implemented foundations include durable fixture execution, constrained Docker workers, content snapshots, brokered coding, independent review, bounded repair, and local delivery. Evaluator and publication contracts have offline substitution and reconciliation tests.
+```sh
+npm ci --ignore-scripts
+npm test
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q
+uv build
+```
 
-The next sequence is a unified job view for candidate stages, explicit review reconciliation tooling, an authenticated evaluator exchange, and publication under exact-candidate authorization. Read-only specialists and routing experiments follow a frozen evaluator comparison. Revisit this sequence when actual usage reveals a more valuable dependency.
-
-Keep commits focused on working behavior and the tests that establish it. Preserve actual versions, meaningful failures, migration decisions, and accurate commit dates.
+The next integration work is a durable remote agent service, explicit reconciliation tooling for uncertain model dispatch, a pinned evaluator bridge, and a live publisher. Add specialist roles based on measured task needs. Keep workflow authority deterministic and revise the implementation sequence as actual runs reveal useful changes.

@@ -6,11 +6,11 @@ Initial research was conducted September 11, 2026. Source inspection informed th
 
 | System | Inspected baseline | Integration decision |
 |---|---|---|
-| Flue reviewer | `024f477e613de41a23a4b6a8986c735f703bbdae`, Flue 2.0.3, Pi 0.83.0 | Reuse the strict one-shot raw-diff CLI. Preserve the running watcher. |
+| Flue runtime | 2.0.3, Pi 0.83.0; installed source and workflow/agent APIs | Use Flue for coding and review, with role-specific capabilities and deterministic cross-stage orchestration. |
 | Agent evaluator | `9b68ab520427e93a104a8d36966401a499f2fd92`, plus its active implementation | Keep transport, experiment scheduling, hidden checks, and grading independent. Recheck changing contracts. |
-| Codex CLI | 0.153.4 | Use explicit configuration and JSONL inside the platform's Docker boundary. Verify actual model transport compatibility. |
+| Existing Flue reviewer | `024f477e613de41a23a4b6a8986c735f703bbdae` | Preserve its verdict schema and keep the running watcher untouched. |
 
-The Flue wrapper already validates bounded JSON verdicts, handles partition/format attempts, and runs fresh review contexts. A blocked verdict can exit zero. The platform therefore validates `blocked`, digest, schema, and line membership independently. Its integration calls the reviewer once and does not introduce another watcher.
+The Flue wrapper already validates bounded JSON verdicts, handles partition/format attempts, and runs fresh review contexts. A blocked verdict can exit zero. The platform therefore validates `blocked`, digest, schema, and line membership independently. The current workflow implements its own Flue review role using the same strict evidence contract and does not introduce another watcher.
 
 The evaluator already supports black-box CLI/HTTP targets and specialized review/coding assessment. Its active changes add durable trials, a workbench, and distributed execution. The producer emits candidates and public evidence, while acceptance remains independent. The current source differences are recorded in [INTEGRATION.md](INTEGRATION.md).
 
@@ -31,7 +31,8 @@ The decisions below are design inferences from the cited sources, subsequently t
 
 | Choice | Reason and revisit condition |
 |---|---|
-| Python, Pydantic, Typer | Small explicit contracts and CLI composition match the existing evaluator ecosystem. |
+| Flue plus a deterministic coordinator | Flue owns agent conversations and tool execution. The coordinator owns budgets, exact evidence, and durable stage transitions. |
+| Python, Pydantic, Typer | Preserve the verified snapshot, container, artifact, and evaluation interfaces as ordinary services. |
 | SQLite and an explicit supervisor | Local transactions can bind state, events, and effects. Revisit distributed orchestration when remote ownership becomes a requirement. |
 | [Temporal](https://docs.temporal.io/activity-execution) as a later distributed option | Durable scheduling is useful for remote execution; application idempotency and process termination still need explicit handling. |
 | [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence) as an alternative | Reconsider when dynamic graph composition earns its complexity. A graph checkpoint does not itself reconcile an external effect. |
@@ -39,6 +40,8 @@ The decisions below are design inferences from the cited sources, subsequently t
 | [Docker isolation](https://docs.docker.com/engine/security/) | Practical local execution with constrained mounts and resources. Verify enforcement with actual canaries. Evaluate stronger Linux isolation for shared hostile workloads. |
 
 ## Decisions revised during implementation
+
+The initial coding-CLI integration was replaced with Flue agents for both coding and review. A registered provider connects them to the configured model gateway. This removes the extra agent runtime and makes role policy explicit. Flue's [workflow guide](https://flueframework.com/docs/guide/workflows/) distinguishes durable individual submissions from the script around them; the coordinator checkpoints stage intents and receipts for that cross-stage boundary.
 
 Content-only snapshots replaced full clones so workers receive no source repository history or local Git configuration. Candidate acceptance binds a content digest even before a Git commit exists.
 

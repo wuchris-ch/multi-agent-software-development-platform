@@ -30,6 +30,11 @@ jobs:
           docker build -t swe-platform-flue:local -f containers/flue.Dockerfile .
           echo "SWE_PLATFORM_AGENT_IMAGE=$(docker image inspect swe-platform-flue:local --format '{{.Id}}')" >> "$GITHUB_ENV"
       - run: uv run pytest -q
+      - name: Replay process recovery and bounded repair
+        run: |
+          uv run python examples/replay.py /tmp/development-replay
+          uv run python examples/replay.py /tmp/development-replay
+          uv run swe-platform evidence verify /tmp/development-replay/evidence.json
       - run: uv build
       - name: Installed wheel smoke
         run: |

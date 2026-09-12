@@ -159,7 +159,20 @@ def test_single_mode_runs_public_checks_without_creating_review_evidence(reposit
 def test_selective_flue_plan_uses_two_read_only_specialists_and_one_writer(repository, tmp_path):
     (repository / "notes.txt").write_text("The consumer expects a numeric value.\n")
     subprocess.run(["git", "add", "notes.txt"], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add consumer context"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "Add consumer context",
+        ],
+        cwd=repository,
+        check=True,
+    )
     workflow, _ = inputs(repository, tmp_path, None)
     barrier = threading.Barrier(2)
 

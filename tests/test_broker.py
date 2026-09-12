@@ -1,12 +1,14 @@
 import base64
 import json
 import shlex
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
 import pytest
 
-from swe_platform.broker.host import BrokerPolicy, CodingRun, mask_model_metadata
+from swe_platform.broker.host import AttachedOutput, BrokerPolicy, CodingRun, mask_model_metadata
 from swe_platform.io import canonical
 
 
@@ -175,3 +177,84 @@ def test_exhausted_broker_stops_worker_and_never_replays_intent(tmp_path):
         run.run(*args, timeout=45, max_requests=1)
     assert len(gateway.requests) == 1
     run.docker.remove(execution)
+
+
+def test_failed_cli_retains_redacted_diagnostic_without_success_receipt(tmp_path):
+    class RejectedGateway(FakeGateway):
+        def request(self, body, deadline):
+            self.requests.append(body)
+            return (
+                400,
+                "application/json",
+                canonical({"error": {"message": "fixture-model rejected request"}}),
+            )
+
+    gateway = RejectedGateway()
+    run = CodingRun(tmp_path)
+    with pytest.raises(ValueError, match="Incomplete Codex"):
+        run.run("rejected", {}, "Say done.", [], gateway, timeout=30)
+    diagnostic = json.loads(next(tmp_path.rglob("failure.json")).read_bytes())
+    assert diagnostic["worker_exit"] != 0
+    assert diagnostic["model_requests"] == 1
+    assert "rejected request" in diagnostic["events"]
+    assert "fixture-model" not in json.dumps(diagnostic)
+    assert not list(tmp_path.rglob("result.json"))
+    execution = json.loads(next(tmp_path.rglob("intent.json")).read_bytes())["execution_id"]
+    assert not run.docker.inspect(execution)["State"]["Running"]
+    run.docker.remove(execution)
+
+
+@pytest.mark.parametrize("size", [128 * 1024, 2 * 1024 * 1024, 10 * 1024 * 1024])
+def test_attach_drains_before_startup_confirmation_and_bounds_backlog(size):
+    process = subprocess.Popen(
+        [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(b'x' * {size})"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    output = AttachedOutput(process)
+    try:
+        # Startup can wait for the child before the protocol consumer begins polling.
+        process.wait(timeout=3)
+        if size > 4 * 1024 * 1024:
+            with pytest.raises(ValueError, match="output limit"):
+                output.poll(0.1)
+        else:
+            received = bytearray()
+            while output.streams:
+                for pipe, data in output.poll(0.1):
+                    if pipe is process.stdout:
+                        received.extend(data)
+            assert received == b"x" * size
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        output.close()
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_startup_handshake_preserves_next_frame_and_rejects_early_exit(valid):
+    data = b'{"type":"ready"}\nnext-frame\n' if valid else b""
+    process = subprocess.Popen(
+        [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({data!r})"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    output = AttachedOutput(process)
+    try:
+        if valid:
+            assert output.confirm_start(3) == b""
+            received = bytearray()
+            while output.streams:
+                for pipe, chunk in output.poll(0.1):
+                    if pipe is process.stdout:
+                        received.extend(chunk)
+            assert received == b"next-frame\n"
+        else:
+            with pytest.raises(ValueError, match="launch could not be confirmed"):
+                output.confirm_start(3)
+    finally:
+        process.wait(timeout=3)
+        output.close()

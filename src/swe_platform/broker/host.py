@@ -1,11 +1,13 @@
 import base64
 import json
 import os
-import selectors
+import queue
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..adapters.codex import collect
 from ..credentials import GatewayProfile
@@ -14,6 +16,83 @@ from ..process import bounded_run
 from ..sandbox.docker import Docker, safe_path
 
 CODEX_IMAGE = "sha256:9a72f4e1ed563ee949496b0b345c8c47559beef87130c93ab3ae9a49789f1d18"
+
+
+class AttachedOutput:
+    """Drain attach output immediately, including while Docker confirms startup."""
+
+    def __init__(self, process):
+        self.process = process
+        self.queue = queue.Queue(maxsize=4096)
+        self.pending_bytes = 0
+        self.buffer_lock = threading.Lock()
+        self.overflow = threading.Event()
+        self.streams = 2
+        self.buffered = []
+        self.threads = []
+        for pipe in (process.stdout, process.stderr):
+            thread = threading.Thread(target=self.drain, args=(pipe,), daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+    def drain(self, pipe):
+        while True:
+            chunk = os.read(pipe.fileno(), 65536)
+            with self.buffer_lock:
+                if self.pending_bytes + len(chunk) > 4 * 1024 * 1024:
+                    self.overflow.set()
+                elif not self.overflow.is_set():
+                    try:
+                        self.queue.put_nowait((pipe, chunk))
+                        self.pending_bytes += len(chunk)
+                    except queue.Full:
+                        self.overflow.set()
+                # Drain and discard after overflow so stdout cannot deadlock the worker.
+            if not chunk:
+                return
+
+    def poll(self, timeout):
+        if self.overflow.is_set():
+            raise ValueError("Worker attach output limit exceeded")
+        if self.buffered:
+            return [self.buffered.pop(0)]
+        try:
+            pipe, chunk = self.queue.get(timeout=timeout)
+        except queue.Empty:
+            return []
+        with self.buffer_lock:
+            self.pending_bytes -= len(chunk)
+        if not chunk:
+            self.streams -= 1
+        return [(pipe, chunk)]
+
+    def confirm_start(self, timeout):
+        deadline = time.monotonic() + timeout
+        data, errors = bytearray(), bytearray()
+        while self.streams and time.monotonic() < deadline:
+            for pipe, chunk in self.poll(0.1):
+                if pipe is self.process.stderr:
+                    errors.extend(chunk)
+                    if len(errors) > 16384:
+                        raise ValueError("Container diagnostic limit exceeded")
+                    continue
+                data.extend(chunk)
+                if b"\n" in data:
+                    line, _, tail = data.partition(b"\n")
+                    if line != b'{"type":"ready"}':
+                        raise ValueError("Invalid worker startup handshake")
+                    if tail:
+                        self.buffered.append((pipe, bytes(tail)))
+                    return errors
+                if len(data) > 1024:
+                    raise ValueError("Worker startup handshake too large")
+        raise ValueError("Container launch could not be confirmed")
+
+    def close(self):
+        for thread in self.threads:
+            thread.join(timeout=2)
+        for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+            pipe.close()
 
 
 class BrokerPolicy:
@@ -280,39 +359,33 @@ class CodingRun:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
-                # Do not release launch ownership while docker start can still launch late.
-                launch_deadline = time.monotonic() + 10
-                while time.monotonic() < launch_deadline:
-                    started = self.docker.inspect(execution)
-                    if started and started["State"]["Status"] != "created":
-                        break
-                    if process.poll() is not None:
-                        break
-                    time.sleep(0.02)
-                else:
-                    process.kill()
+                output = AttachedOutput(process)
+                try:
+                    # Output from the entrypoint proves launch without a concurrent
+                    # status query, which can stall during attached starts.
+                    # Keep launch ownership until this handshake or confirmed cancellation.
+                    startup_errors = output.confirm_start(min(15, timeout))
+                except BaseException:
+                    if process.poll() is None:
+                        process.kill()
                     process.wait()
+                    output.close()
                     self.docker._cancel(execution)
-                    raise ValueError("Container launch could not be confirmed")
+                    raise
             policy = BrokerPolicy(
                 gateway.profile.model, deadline=deadline, max_requests=max_requests
             )
-            selector = selectors.DefaultSelector()
-            selector.register(process.stdout, selectors.EVENT_READ)
-            selector.register(process.stderr, selectors.EVENT_READ)
             frames = bytearray()
-            errors = bytearray()
+            errors = startup_errors
             completion = None
             try:
-                while selector.get_map() and time.time() < deadline + 3:
+                while output.streams and time.time() < deadline + 3:
                     if (directory / "cancel").exists():
                         raise ValueError("Coding attempt was cancelled")
-                    for event, _ in selector.select(0.1):
-                        chunk = os.read(event.fd, 65536)
+                    for pipe, chunk in output.poll(0.1):
                         if not chunk:
-                            selector.unregister(event.fileobj)
                             continue
-                        if event.fileobj is process.stderr:
+                        if pipe is process.stderr:
                             errors.extend(chunk)
                             if len(errors) > 16384:
                                 raise ValueError("Container diagnostic limit exceeded")
@@ -350,21 +423,6 @@ class CodingRun:
                 if frames.strip():
                     raise ValueError("Truncated worker protocol frame")
                 if not completion or process.returncode or completion["reason"]:
-                    atomic_write(
-                        directory / "failure.json",
-                        canonical(
-                            {
-                                "attach_exit": process.returncode,
-                                "worker_exit": completion.get("exit_code") if completion else None,
-                                "reason": completion.get("reason")
-                                if completion
-                                else "missing_completion",
-                                "diagnostic": completion.get("diagnostic", "")
-                                if completion
-                                else errors.decode(errors="replace"),
-                            }
-                        ),
-                    )
                     raise ValueError("Coding execution did not produce a complete candidate")
                 parsed = collect(base64.b64decode(completion["events"]), completion["exit_code"])
                 if set(completion["files"]) != set(allowed):
@@ -393,14 +451,50 @@ class CodingRun:
                 atomic_write(directory / "result.json", canonical(result))
                 self.docker.remove(execution)
                 return result
-            except BaseException:
-                # Termination is checked through Docker, not inferred from an attach process exit.
-                self.docker.cancel(execution)
+            except BaseException as exc:
+                # Keep bounded worker diagnostics private, including nonzero CLI exits
+                # discovered by collect(). Never include trusted profile values.
+                frame = completion or {}
+                try:
+                    events = base64.b64decode(frame.get("events", ""), validate=True).decode(
+                        errors="replace"
+                    )
+                except (ValueError, TypeError):
+                    events = "Invalid worker event encoding"
+                diagnostic = frame.get("diagnostic", errors.decode(errors="replace"))
+                detail = {
+                    "error_class": type(exc).__name__,
+                    "attach_exit": process.poll(),
+                    "worker_exit": frame.get("exit_code")
+                    if type(frame.get("exit_code")) is int
+                    else None,
+                    "reason": frame.get("reason")
+                    if frame.get("reason") in (None, "timeout", "output_limit", "scope_violation")
+                    else "invalid_completion",
+                    "model_requests": policy.requests,
+                    "diagnostic": diagnostic[:8000]
+                    if isinstance(diagnostic, str)
+                    else "Invalid worker diagnostic",
+                    "events": events[: 2 * 1024 * 1024],
+                }
+                protected = [gateway.profile.model, *getattr(gateway, "environment", {}).values()]
+                endpoint = getattr(gateway.profile, "base_url", "")
+                protected += [
+                    endpoint,
+                    urlsplit(endpoint).hostname or "",
+                    getattr(gateway.profile, "keychain_service", ""),
+                ]
+                for field in ("diagnostic", "events"):
+                    for value in sorted(set(filter(None, protected)), key=len, reverse=True):
+                        detail[field] = detail[field].replace(value, "[redacted]")
+                try:
+                    atomic_write(directory / "failure.json", canonical(detail))
+                finally:
+                    # Even a diagnostic storage failure must stop the container.
+                    self.docker.cancel(execution)
                 raise
             finally:
                 if process.poll() is None:
                     process.kill()
                 process.wait()
-                selector.close()
-                for pipe in (process.stdin, process.stdout, process.stderr):
-                    pipe.close()
+                output.close()

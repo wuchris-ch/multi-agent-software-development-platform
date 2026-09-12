@@ -87,6 +87,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    emit({"type": "ready"})
     spec = json.loads(Path("/input.json").read_bytes())
     root = Path("/work")
     os.chdir(root)

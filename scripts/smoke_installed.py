@@ -1,5 +1,6 @@
 """Run with a clean wheel environment, from a directory outside this checkout."""
 
+import hashlib
 import json
 import secrets
 import signal
@@ -42,6 +43,11 @@ def main():
         "static/index.html",
     ):
         assert files("swe_platform").joinpath(resource).read_bytes()
+    contracts = files("swe_platform").joinpath("contracts/v2")
+    pin = json.loads(contracts.joinpath("pin.json").read_bytes())
+    assert len(pin["files"]) == 7
+    for name, sha256 in pin["files"].items():
+        assert hashlib.sha256(contracts.joinpath(name).read_bytes()).hexdigest() == sha256
     with tempfile.TemporaryDirectory(prefix="swe-wheel-", dir="/tmp") as tmp:
         root = Path(tmp).resolve()
         process = subprocess.Popen(

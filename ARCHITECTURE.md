@@ -1,12 +1,16 @@
 # Architecture
 
-Flue owns agent execution. A deterministic coordinator owns the development workflow. The model gateway supplies LLM access to both agent roles. Docker supplies disposable execution environments, and content-addressed artifacts bind every check and review to an exact candidate.
+Flue owns agent execution. A deterministic coordinator owns the development workflow. The model gateway supplies LLM access to the configured roles. Docker supplies disposable execution environments, and content-addressed artifacts bind every check and review to an exact candidate.
 
 ```mermaid
 flowchart TD
     T[Repository task] --> W[Durable workflow coordinator]
     W --> S[Frozen source snapshot]
     S --> C[Flue coding agent]
+    S -->|selective mode| A[Read-only Flue planner]
+    A -->|advisory plan| C
+    A --> H[Up to two read-only specialists]
+    H -->|snapshot-bound handoffs| C
     C --> P[Sealed candidate]
     P --> V[Fresh verification environment]
     V -->|passing checks| R[Independent Flue review agent]
@@ -17,6 +21,8 @@ flowchart TD
     W <--> J[Stage journal and shared budget]
     C <--> B[Model broker]
     R <--> B
+    A <--> B
+    H <--> B
     B <--> G[Configured model gateway]
 ```
 

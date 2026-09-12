@@ -14,6 +14,8 @@ The Unix-socket RPC uses an `ok` envelope around operation results so a job's ow
 
 ## Candidates and evidence
 
+`development-evidence-bundle/v1` is a bounded portable JSON document containing the exact candidate manifest and artifact bytes, public recipe, verification and review receipts, and typed run metadata. Verification rejects unrelated artifacts, substituted candidate bytes, mismatched checks and reviews, invalid file modes, and inconsistent recipe identities. Its digest is over the exported bytes.
+
 | Record | Binding |
 |---|---|
 | `candidate/v1` | Base Git revision, files and modes, tree digest, changed paths, binary patch digest |
@@ -30,6 +32,14 @@ Candidate intake accepts an existing binary patch or a completed isolated coding
 ## Development workflow
 
 `development-workflow/v1` binds the source snapshot, task, allowed paths, recipe, runtime image, coding/review profile identities, absolute deadline, shared request cap, and repair limit to one key. Its journal contains ordered events, named stage intents and results, the active execution, and candidate lineage.
+
+The original key is saved for control-panel operations. A short dispatch lock serializes stage admission with cancellation. Resume restores the active stage before continuing its operation. Cancellation is confirmed only after active execution termination; no active coordinator is required to cancel an inactive job.
+
+## GitHub publication
+
+`github-publication-plan/v1` pins repository and actor identities, base and new branch, locally computed Git tree/commit, candidate and evidence digests, PR text and a 24-hour expiration. Its canonical digest is the approval token. A durable publication journal records branch and PR intents, receipts, reconciliation events and checks tied to the remote head.
+
+POST `/api/workflows/{id}/publications` prepares a plan. POST `.../{plan}/publish` requires the same `plan_sha256` in its body. POST `.../{plan}/reconcile` performs remote reads only. All mutations require an operator token; viewers may inspect evidence and download bundles.
 
 Model-request reservations are committed before stage dispatch. A completed receipt replaces its reservation with the observed request count. An uncertain attempt keeps the reservation. Reusing the key with a changed policy rejects; resuming the same job cannot reset the budget or deadline.
 

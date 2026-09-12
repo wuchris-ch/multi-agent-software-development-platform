@@ -62,7 +62,13 @@ The draft remains unmerged, with the failing baseline preserved. Publication was
 
 Raw receipts, run journals, acceptance suites, reproduced findings, and remote verification records remain in private application state. Historical exercises are retained separately from this Flue implementation's evidence.
 
-## Evaluation protocol
+## Publication recovery and packaged console, September 11, 2026
+
+The platform's live publisher prepared a new draft from the sealed candidate above, then the process exited immediately after GitHub created the PR and before its receipt was saved. A fresh process performed **16 GET requests and no writes**, adopted exactly one matching draft, verified all remote content and ancestry, and saved the recovered receipt. Both branch and PR checks passed for head `9ffe745d782c4b4668e0d7965c9ba0a0a0f063d0`.
+
+The Python suite passed **124 tests**, including publication ambiguity, pagination, actor/branch/content substitution, cancellation races, evidence export and console permissions. The React suite passed **six tests**, followed by TypeScript checking and a production build. Browser inspection used real saved workflow data to verify the candidate diff, public checks, independent review and recovered PR status. The installed wheel smoke runs outside the checkout and validates its Docker fixture, packaged React assets and authenticated console API.
+
+## Comparison protocol
 
 Compare a strong single coding agent, independent review with bounded repair, and selective read-only specialists under equal task and budget conditions. Freeze tasks, model configuration, images, recipe, evaluator revision, repetitions, and decision thresholds before a comparative run.
 

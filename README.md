@@ -29,6 +29,25 @@ uv run swe-platform workflow cancel fix-pagination
 
 Repeat the original command to resume. Completed stages reuse their saved results. Inspection shows the current patch, checks, review, repair history, and model-request budget. A passing current candidate is `ready_local`.
 
+## Inspect and deliver
+
+The React control panel follows saved runs, displays candidate diffs and review findings, and prepares an exact GitHub draft publication for approval.
+
+```sh
+npm --prefix web ci --ignore-scripts
+npm --prefix web run build
+uv run swe-platform ui
+```
+
+Open the operator or viewer URL printed by the command. The console binds to loopback and reads the same durable state as the CLI. Publishing records its intent before contacting GitHub. If a response is lost, reconciliation finds and verifies the existing branch and draft PR.
+
+Export a portable evidence bundle for offline inspection:
+
+```sh
+uv run swe-platform workflow export fix-pagination evidence.json
+uv run swe-platform evidence verify evidence.json
+```
+
 ## Work one stage at a time
 
 The candidate commands support existing patches and custom workflows:
@@ -58,6 +77,9 @@ Use `candidate import` for an existing patch and `candidate repair` for a replac
 ```sh
 npm ci --ignore-scripts
 npm test
+npm --prefix web ci --ignore-scripts
+npm --prefix web test
+npm --prefix web run build
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest -q

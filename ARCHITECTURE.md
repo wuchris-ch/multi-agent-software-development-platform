@@ -67,4 +67,16 @@ Each candidate manifest binds the original revision, content tree, changed paths
 
 Review output must match the exact patch digest and schema. Findings must reference changed lines, and severity must agree with the risk and blocking decision. Exit zero alone never establishes acceptance. Repairs start from the preceding candidate, receive only public-check and review feedback, and produce a new patch against the original baseline.
 
-The independent evaluator owns hidden suites, grading policy, and comparisons. Its contract is tracked in [INTEGRATION.md](INTEGRATION.md). Publication is a separate capability: local workflows produce inspectable patches, while live GitHub publication currently uses trusted operator commands. The offline publication adapter exercises exact-candidate authorization and ambiguous remote effects before a live publisher is introduced.
+The independent evaluator owns hidden suites, grading policy, and comparisons. Its contract is tracked in [INTEGRATION.md](INTEGRATION.md). Publication is a separate capability with its own durable journal and explicit approval of an immutable plan.
+
+## Delivery and control panel
+
+The GitHub publisher binds the authenticated actor, repository identity, original base, new branch, exact Git objects, candidate and evidence to a plan. Preparation reads remote state. Approval authorizes that plan digest. Immutable blobs, trees and commits have locally computed identities that must match GitHub's response. The publisher never updates an existing branch.
+
+Branch and PR intents precede remote calls. After an uncertain PR response, reconciliation reads all matching PR pages and adopts only an exact open draft with the expected author, base, head and marker. An unresolved PR dispatch remains ambiguous and is not posted again. Remote file contents, modes and ancestry are checked before recording publication. CI results are associated with the published head.
+
+FastAPI serves the React control panel and an authenticated local API. Operator and viewer capabilities are separate; mutation endpoints reject viewers. Host and Origin checks constrain the loopback service. The API reads the existing journals and invokes their owners for cancellation or publication. It does not introduce another workflow queue or independent state machine.
+
+Evidence bundles carry the candidate, patch, recipe, verification output, review and bounded run metadata. Offline verification recomputes artifact identities and evidence bindings. It establishes bundle integrity and local readiness; independent acceptance remains the evaluator's responsibility.
+
+Design decisions and failure behavior are recorded in [DESIGN.md](DESIGN.md).

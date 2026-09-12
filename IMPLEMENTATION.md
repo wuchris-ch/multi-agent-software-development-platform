@@ -92,15 +92,36 @@ Workflow candidates live under that workflow's evidence namespace. Use `workflow
 
 The fixture service still supports `serve`, `submit`, `status`, and `cancel` for deterministic supervisor and SQLite recovery tests. It is separate from the repository workflow command.
 
-## Development
+## Control panel and draft publication
+
+Build the web assets with `npm --prefix web ci --ignore-scripts` and `npm --prefix web run build`, then run `uv run swe-platform ui`. The CLI prints separate operator and viewer URLs. The session token moves from the launch fragment into session storage; requests authenticate through a bearer header. The service listens on loopback. Use `--port` to select another port.
+
+The Publication tab prepares an immutable destination and commit for review. An operator approves that plan to create a draft PR. The CLI exposes the same operations:
+
+```sh
+uv run swe-platform publication prepare <candidate> --workflow fix-pagination \
+  --repository owner/repository --branch development/fix-pagination \
+  --title 'Fix pagination' --body-file description.md
+uv run swe-platform publication publish <plan-digest> --workflow fix-pagination
+uv run swe-platform publication reconcile <plan-digest> --workflow fix-pagination
+```
+
+GitHub CLI must already be authenticated with repository write access. Preparation verifies repository and actor identities and the unchanged base. Plans expire after 24 hours for new writes; recovery reads remain possible after expiration. Reconciliation never creates another PR. If an uncertain dispatch has no matching remote result, retain the saved intent and investigate that operation before preparing another delivery.
+
+`workflow export <key> evidence.json` creates a bounded portable bundle. `evidence verify evidence.json --expected <sha256>` checks its bytes and candidate bindings without a running service. Keep the expected digest from a trusted source when transporting the bundle.
+
+## Development checks
 
 ```sh
 npm ci --ignore-scripts
 npm test
+npm --prefix web ci --ignore-scripts
+npm --prefix web test
+npm --prefix web run build
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest -q
 uv build
 ```
 
-The next integration work is a durable remote agent service, explicit reconciliation tooling for uncertain model dispatch, a pinned evaluator bridge, and a live publisher. Add specialist roles based on measured task needs. Keep workflow authority deterministic and revise the implementation sequence as actual runs reveal useful changes.
+CI builds the React assets before the wheel and installs that wheel into a clean environment outside the checkout. The installed smoke test runs a disposable Docker fixture and checks the packaged console over HTTP.

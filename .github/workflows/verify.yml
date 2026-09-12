@@ -17,6 +17,12 @@ jobs:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
       - run: npm test
+      - name: Verify control panel
+        run: |
+          npm --prefix web ci --ignore-scripts
+          npm --prefix web run format:check
+          npm --prefix web test
+          npm --prefix web run build
       - run: uv sync --frozen
       - run: uv run ruff check . && uv run ruff format --check .
       - name: Prepare coding image

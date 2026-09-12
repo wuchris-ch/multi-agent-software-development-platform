@@ -9,3 +9,5 @@ dist/
 .env
 .env.*
 node_modules/
+src/swe_platform/static/
+web/*.tsbuildinfo

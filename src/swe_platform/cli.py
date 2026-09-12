@@ -1,5 +1,6 @@
 import json
 import platform
+import secrets
 import shutil
 import subprocess
 import uuid
@@ -13,6 +14,7 @@ from .broker.host import AgentRun, HostGateway
 from .candidates import Recipe, Workbench
 from .coding import CandidateCoding
 from .credentials import GatewayProfile
+from .evidence import verify_bundle, write_bundle
 from .github_publication import Publisher
 from .io import lock
 from .models import Submission
@@ -38,6 +40,10 @@ publication_app = typer.Typer(
     no_args_is_help=True, help="Prepare, publish, and reconcile draft PRs"
 )
 app.add_typer(publication_app, name="publication")
+evidence_app = typer.Typer(
+    no_args_is_help=True, help="Verify portable development evidence offline"
+)
+app.add_typer(evidence_app, name="evidence")
 DEFAULT_STATE = Path.home() / "Library/Application Support/SWEPlatform"
 
 
@@ -261,6 +267,18 @@ def cancel_workflow(ctx: typer.Context, key: str):
     emit(Workflow(ctx.obj).cancel(key))
 
 
+@workflow_app.command("export")
+def export_evidence(ctx: typer.Context, key: str, destination: Path):
+    """Export the current candidate, recipe, checks, review, and structured stage history."""
+    emit(write_bundle(Workflow(ctx.obj).directory(key), destination))
+
+
+@evidence_app.command("verify")
+def verify_evidence(bundle: Path, expected: str | None = None):
+    """Validate an evidence bundle without a provider, Docker, or GitHub connection."""
+    emit(verify_bundle(bundle.read_bytes(), expected_sha256=expected))
+
+
 def publisher(root, workflow):
     return Publisher(Workflow(root).directory(workflow) / "evidence" if workflow else root)
 
@@ -305,3 +323,22 @@ def publish_candidate(ctx: typer.Context, plan: str, workflow: str | None = None
 def reconcile_publication(ctx: typer.Context, plan: str, workflow: str | None = None):
     """Read GitHub to reconcile saved writes and refresh checks without creating remote objects."""
     emit(publisher(ctx.obj, workflow).publish(plan, reconcile_only=True))
+
+
+@app.command("ui")
+def control_panel(ctx: typer.Context, port: int = typer.Option(8765, min=1024, max=65535)):
+    """Open the local control panel for runs, diffs, review, and draft PR publication."""
+    import uvicorn
+
+    from .console import create_app
+
+    token, viewer = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    origin = f"http://127.0.0.1:{port}"
+    typer.echo(f"Operator session: {origin}/#token={token}")
+    typer.echo(f"Viewer session: {origin}/#token={viewer}")
+    uvicorn.run(
+        create_app(ctx.obj, token, viewer_token=viewer, origin=origin),
+        host="127.0.0.1",
+        port=port,
+        access_log=False,
+    )

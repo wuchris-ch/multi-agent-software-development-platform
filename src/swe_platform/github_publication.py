@@ -345,6 +345,7 @@ class Publisher:
                             raise ValueError("Publication plan expired; prepare a new plan")
                     if not record.get("approved_at"):
                         record["approved_at"] = time.time()
+                        record["state"] = "publishing"
                         self.save(sha, record, "publication.approved")
                 candidate = load_candidate(self.bench.artifacts, plan.candidate_sha256)
                 if not reconcile_only:

@@ -164,3 +164,19 @@ def test_environment_credentials_are_explicit_and_not_serialized(monkeypatch):
             api_key_env="FIXTURE_MODEL_KEY",
             keychain_service="fixture",
         )
+
+
+def test_standalone_flue_review_reuses_only_the_same_policy(repository, tmp_path):  # noqa: F811
+    from test_workbench import PATCH
+
+    gateway = WorkflowGateway()
+    bench = Workbench(tmp_path / "state")
+    recipe = Recipe(image=PYTHON_IMAGE, argv=["true"])
+    sha = bench.intake(repository, PATCH, ["calc.py"], recipe)["candidate"]
+    report = bench.review_agent(sha, gateway)
+    assert not report["verdict"]["blocked"]
+    assert report["model_requests"] == 1
+    assert bench.review_agent(sha, gateway) == report
+    assert len(gateway.requests) == 1
+    with pytest.raises(ValueError, match="different runtime or policy"):
+        bench.review_agent(sha, gateway, max_requests=3)

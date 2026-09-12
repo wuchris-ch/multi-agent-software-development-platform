@@ -57,7 +57,7 @@ import os, socket
 from pathlib import Path
 assert not Path({str(canary)!r}).exists()
 assert 'AWS_SECRET_ACCESS_KEY' not in os.environ
-for path in ['/var/run/docker.sock', '/Users/chris', '/root/.codex', '/root/.kube', '/evaluator', '/service.sock']:
+for path in ['/var/run/docker.sock', '/Users', '/root/.codex', '/root/.kube', '/evaluator', '/service.sock']:
     try: assert not Path(path).exists(), path
     except PermissionError: pass
 for host in ['1.1.1.1', '169.254.169.254', '192.168.1.1', '172.17.0.1']:

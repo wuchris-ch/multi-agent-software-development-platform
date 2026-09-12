@@ -24,7 +24,7 @@ flowchart TD
 
 The TypeScript/JavaScript agent package uses `@flue/runtime` 2.0.3. `CodingAgent` and `ReviewAgent` are registered Flue agents, invoked with `start`, `init`, `dispatch`, and `read`. The coding agent uses Flue's sandbox tools inside the worker container. The reviewer receives the complete candidate diff in a fresh conversation and has no tools. Both roles use a registered provider through the same model broker; each can select its own configured model.
 
-The default workflow does not spend a model call choosing which stage to run. Its transitions are fixed: implement, verify, review, then either finish or repair. The coding agent can revise its implementation strategy as new evidence arrives. Further specialists can be added as bounded roles when evaluation establishes a benefit.
+The default workflow has fixed transitions: implement, verify, review, then either finish or repair. Selective mode adds a read-only planning stage. Its validated plan may request at most two specialists over disjoint source file sets. Specialists run concurrently with read, grep and glob, return snapshot-bound handoffs, and cannot change files or approval policy. The same single coding agent remains responsible for every candidate. Single mode supplies a coding baseline with public checks and a distinct `verified_local` state.
 
 The Flue runtime owns each agent's conversation and tool loop. The Python coordinator owns cross-stage policy, checkpoints, resource accounting, and exact-content acceptance. Snapshot, verification, and artifact services remain ordinary deterministic code. There is no coding-CLI dependency or second agent framework.
 
@@ -35,6 +35,10 @@ This follows Flue's distinction between [agent execution and durable workflows](
 Each workflow key owns a private job directory, an immutable source snapshot, a stage journal, an agent execution directory, and candidate evidence. An exclusive file lock permits one active coordinator for that key. Atomic fsync-and-rename writes commit requests, stage intents, receipts, events, and the current candidate lineage.
 
 A stage reserves its model-request allowance before dispatch. Completed stages account for actual requests; an interrupted stage without a receipt retains its reservation. Coding and review share one job budget and one absolute deadline. Resuming cannot reset either. Each task permits at most two repairs.
+
+New workflows also maintain a broker-side ledger for each actual model request. Concurrent roles atomically reserve from shared request and token allowances before dispatch. Token admission reserves serialized input bytes, protocol margin and the entire output allowance; gateway-reported usage resolves that reservation. Missing usage and uncertain responses retain the allowance. An observed overrun is recorded and blocks further dispatch. This is conservative admission accounting, with reported usage tracked separately from estimates.
+
+Structured traces link stage, model and observed tool-result spans to a workflow, with candidate, request and artifact digests. Trace exports contain no prompt or tool-output text. A tool-result span denotes a broker observation; deterministic verification remains the authority for test outcomes. Publication events join the same trace when exported.
 
 Agent intent precedes execution. A completed agent receipt can finish candidate intake after a coordinator interruption, and completed workflow stages return their saved results. An interrupted model dispatch without a durable result is not automatically replayed. Each Flue attempt is a fresh process-lifetime conversation; recovery here reuses stage receipts rather than claiming to resume an arbitrary interrupted model/tool exchange.
 

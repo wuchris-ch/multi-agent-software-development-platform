@@ -29,6 +29,8 @@ uv run swe-platform workflow cancel fix-pagination
 
 Repeat the original command to resume. Completed stages reuse their saved results. Inspection shows the current patch, checks, review, repair history, and model-request budget. A passing current candidate is `ready_local`.
 
+Use `--mode selective` for a planner and up to two read-only specialists before the sole coding agent. The planner requests specialists only for separate work. `--mode single` provides a coding baseline with public checks. The default `review` mode adds independent review and bounded repairs. Each mode shares one durable request budget, token admission budget and absolute deadline.
+
 ## Inspect and deliver
 
 The React control panel follows saved runs, displays candidate diffs and review findings, and prepares an exact GitHub draft publication for approval.

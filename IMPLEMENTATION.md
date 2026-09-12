@@ -63,6 +63,10 @@ Coding stages reserve up to 12 requests, review stages up to two, within the sha
 
 A repair receives the previous candidate and the public-check output or blocking review, with bounded feedback. It does not receive hidden tests. After the configured repair count, a still-blocked task becomes `needs_attention`.
 
+Choose `--mode single`, `--mode review` or `--mode selective`; the default is review. `workflow policy selective` prints the versioned policy and digest. A trusted JSON policy can instead be selected with `--policy`. Policy identity is frozen with the request. Selective mode validates its plan and read-only handoffs before coding. Single mode stops at `verified_local` after public checks; it does not create independent review evidence.
+
+`--max-total-tokens` sets the shared token admission allowance, default 250,000. The broker records actual request-level usage when reported, retains unknown reservations, and never resets the ledger during resume. `workflow trace <key> trace.json` exports linked stage, model, tool-result and publication observations. Evidence bundles include that trace as a hash-verified artifact.
+
 ## Individual stages
 
 ```sh
@@ -125,3 +129,24 @@ uv build
 ```
 
 CI builds the React assets before the wheel and installs that wheel into a clean environment outside the checkout. The installed smoke test runs a disposable Docker fixture and checks the packaged console over HTTP.
+
+## Configured console projects
+
+`ui --config console.json` enables task submission for a fixed set of trusted repositories. Each project selects its source, allowed paths, immutable agent image, public verification recipe, private gateway profile and shared resource ceilings. The browser can choose the configured project and coordination mode; it cannot supply host paths or expand those ceilings.
+
+A project may name an `evaluator_profile`. Such runs also require a pre-reserved execution ID and validate its ticket before production. The Acceptance tab uploads evidence, submits after operator contract issuance, and retrieves the bound assessment. The local console admits one active workflow at a time, persists each launch request, and uses the same coordinator for resume and cancellation.
+
+## Policy improvement
+
+```sh
+uv run swe-platform improvement initialize --mode review
+uv run swe-platform improvement propose <parent-policy-sha256>
+uv run swe-platform improvement register candidate-policy.json
+uv run swe-platform improvement freeze promotion-gate.json
+uv run swe-platform improvement evaluate <gate-sha256> development
+uv run swe-platform improvement evaluate <gate-sha256> held_out
+uv run swe-platform improvement promote <gate-sha256> <expected-policy-sha256> <generation>
+uv run swe-platform improvement rollback <previous-policy-sha256> <expected-policy-sha256> <generation>
+```
+
+Proposals require a recurring failure in at least two development runs. The bounded search changes coding guidance and preserves verifier authority. Gate files declare disjoint task families, paired repetitions and a minimum development improvement before either comparison starts. The control panel shows completed comparisons and rollout history. Selecting Current production policy for a new console run freezes the active policy in that run's admission record; later rollout does not alter an existing run.

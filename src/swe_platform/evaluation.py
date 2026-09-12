@@ -1,4 +1,4 @@
-"""Contract fixture for the evaluator's proposed API, not a live integration."""
+"""Local evidence-binding proposal; deliberately distinct from evaluator wire schemas."""
 
 from typing import Annotated, Literal
 
@@ -29,7 +29,9 @@ class Usage(StrictModel):
 
 
 class Submission(StrictModel):
-    schema_version: Literal["agent-eval.submission/v1"] = "agent-eval.submission/v1"
+    schema_version: Literal["swe-platform.evaluation-proposal/v1"] = (
+        "swe-platform.evaluation-proposal/v1"
+    )
     execution_id: str = Field(min_length=1, max_length=200)
     producer_run_id: str = Field(min_length=1, max_length=200)
     base_revision: Revision
@@ -44,7 +46,7 @@ class Submission(StrictModel):
 
 
 class Decision(StrictModel):
-    schema_version: Literal["agent-eval.decision/v1"] = "agent-eval.decision/v1"
+    schema_version: Literal["swe-platform.decision-binding/v1"] = "swe-platform.decision-binding/v1"
     execution_id: str
     submission_sha256: Sha256
     assessment_set_sha256: Sha256

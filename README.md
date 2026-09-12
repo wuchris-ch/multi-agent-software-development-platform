@@ -31,6 +31,17 @@ Repeat the original command to resume. Completed stages reuse their saved result
 
 Use `--mode selective` for a planner and up to two read-only specialists before the sole coding agent. The planner requests specialists only for separate work. `--mode single` provides a coding baseline with public checks. The default `review` mode adds independent review and bounded repairs. Each mode shares one durable request budget, token admission budget and absolute deadline.
 
+## Replay recovery locally
+
+After building the agent image, run a complete fixture exercise without a model account:
+
+```sh
+uv run python examples/replay.py /tmp/development-replay
+uv run swe-platform --state /tmp/development-replay/state ui
+```
+
+The replay uses real Flue agents and disposable containers with deterministic model responses. It exits a process after the coding receipt is saved, resumes in a fresh process, repairs a failed public check, and exports a verifiable evidence bundle. Repeating the command reuses the saved results. [Replay guide](examples/README.md)
+
 ## Inspect and deliver
 
 The React control panel follows saved runs, displays candidate diffs and review findings, and prepares an exact GitHub draft publication for approval.
@@ -69,6 +80,7 @@ Use `candidate import` for an existing patch and `candidate repair` for a replac
 | Document | Contents |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | Agent roles, orchestration, state, and execution boundaries |
+| [Design decisions](DESIGN.md) | State ownership, failure handling and deployment tradeoffs |
 | [Implementation](IMPLEMENTATION.md) | Setup, configuration, commands, and recovery |
 | [Contracts](CONTRACTS.md) | Durable records and adapter interfaces |
 | [Evaluator integration](INTEGRATION.md) | Independent acceptance and evaluation |

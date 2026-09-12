@@ -1,0 +1,12 @@
+{
+  "source_revision": "e028f37195cbd8519b80d7b2e20af443ec57502f",
+  "files": {
+    "ArtifactEnvelope.schema.json": "ab8c79e856e82d2aa4c8f4517bc9c2974b17a0d55e10002bbe5db4841bb3f6e2",
+    "Assessment.schema.json": "0745e1f09a29daea12cffa101d9615975bbf0faca00be5f7a753af678b4f018d",
+    "CandidateManifest.schema.json": "115213034a267ef215d80cd9b6ecbf06818c59a0fe17f86d3265b09ad5bb9f2f",
+    "ExecutionContract.schema.json": "a460efd18986b980005235969a39c1ea0b2f634c26595d95b7c8e636ed2d947f",
+    "Recipe.schema.json": "162042eddec826cc9f40446998d520cb4444a35c57a733b28ba290dd5b7f371d",
+    "Submission.schema.json": "18b29279d0e88097d9e53fe3c4a467f235d67b6317d5961f47bbc814d833a68e",
+    "TrialTicket.schema.json": "51d3c5cfd4f317008169471ce9281d87ed64bf64910c2242441281f3c9981931"
+  }
+}

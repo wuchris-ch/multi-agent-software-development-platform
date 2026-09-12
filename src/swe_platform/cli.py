@@ -16,11 +16,14 @@ from .coding import CandidateCoding
 from .credentials import GatewayProfile
 from .evidence import verify_bundle, write_bundle
 from .github_publication import Publisher
-from .io import lock
+from .io import atomic_write, canonical, lock
 from .models import Submission
+from .policy import DevelopmentPolicy
+from .producer import EvaluatorClient, EvaluatorProfile, Producer, ProducerRequest
 from .service import request
 from .service import serve as run_service
 from .store import Store
+from .telemetry import execution_trace
 from .workflow import Workflow
 
 app = typer.Typer(
@@ -44,6 +47,10 @@ evidence_app = typer.Typer(
     no_args_is_help=True, help="Verify portable development evidence offline"
 )
 app.add_typer(evidence_app, name="evidence")
+producer_app = typer.Typer(
+    no_args_is_help=True, help="Run reserved evaluation trials and submit exact candidates"
+)
+app.add_typer(producer_app, name="producer")
 DEFAULT_STATE = Path.home() / "Library/Application Support/SWEPlatform"
 
 
@@ -231,8 +238,20 @@ def run_workflow(
     timeout: float = 600,
     max_requests: int = 30,
     max_repairs: int = 2,
+    max_total_tokens: int | None = None,
+    mode: str | None = None,
+    policy: Path | None = None,
 ):
     """Run or resume an entire development task with Flue agents."""
+    if mode and policy:
+        raise typer.BadParameter("Select a mode or a policy file")
+    selected = (
+        DevelopmentPolicy.model_validate_json(policy.read_bytes())
+        if policy
+        else DevelopmentPolicy.preset(mode)
+        if mode
+        else None
+    )
     gateway = HostGateway(GatewayProfile.model_validate_json(gateway_profile.read_bytes()))
     reviewer = (
         HostGateway(GatewayProfile.model_validate_json(review_profile.read_bytes()))
@@ -251,6 +270,8 @@ def run_workflow(
             timeout=timeout,
             max_requests=max_requests,
             max_repairs=max_repairs,
+            max_total_tokens=max_total_tokens,
+            policy=selected,
         )
     )
 
@@ -271,6 +292,53 @@ def cancel_workflow(ctx: typer.Context, key: str):
 def export_evidence(ctx: typer.Context, key: str, destination: Path):
     """Export the current candidate, recipe, checks, review, and structured stage history."""
     emit(write_bundle(Workflow(ctx.obj).directory(key), destination))
+
+
+@workflow_app.command("trace")
+def export_trace(ctx: typer.Context, key: str, destination: Path):
+    """Export stage, model, tool, repair and publication observations without prompt text."""
+    raw = canonical(execution_trace(Workflow(ctx.obj).directory(key)))
+    atomic_write(destination, raw)
+    emit({"path": str(destination.resolve()), "bytes": len(raw)})
+
+
+@workflow_app.command("policy")
+def show_policy(mode: str = "review"):
+    """Print an immutable production policy for configuration and matched comparisons."""
+    selected = DevelopmentPolicy.preset(mode)
+    emit({"policy": selected.model_dump(), "sha256": selected.sha256})
+
+
+def evaluator(path):
+    return EvaluatorClient(EvaluatorProfile.model_validate_json(path.read_bytes()))
+
+
+@producer_app.command("recipe")
+def producer_recipe(request_file: Path):
+    emit(ProducerRequest.model_validate_json(request_file.read_bytes()).recipe_descriptor())
+
+
+@producer_app.command("run")
+def producer_run(ctx: typer.Context, request_file: Path, ticket: Path, profile: Path):
+    """Validate an evaluator-issued reservation before production dispatch."""
+    request = ProducerRequest.model_validate_json(request_file.read_bytes())
+    emit(Producer(ctx.obj, evaluator(profile)).run(request, json.loads(ticket.read_bytes())))
+
+
+@producer_app.command("binding")
+def producer_binding(ctx: typer.Context, key: str):
+    """Describe sealed content for the evaluator to issue its final execution contract."""
+    emit(Producer(ctx.obj, None).binding(key))
+
+
+@producer_app.command("submit")
+def producer_submit(ctx: typer.Context, key: str, profile: Path):
+    emit(Producer(ctx.obj, evaluator(profile)).submit(key))
+
+
+@producer_app.command("assessment")
+def producer_assessment(ctx: typer.Context, key: str, profile: Path):
+    emit(Producer(ctx.obj, evaluator(profile)).assessment(key))
 
 
 @evidence_app.command("verify")

@@ -23,7 +23,7 @@ from .workflow import Workflow
 app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_show_locals=False,
-    help="Durable local software engineering jobs",
+    help="Durable local software development jobs",
 )
 candidate_app = typer.Typer(
     no_args_is_help=True, help="Import and inspect local repository patches"

@@ -9,13 +9,16 @@ import json
 import shutil
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .broker.host import AGENT_VERSION, AgentRun
 from .candidates import Workbench
 from .io import atomic_write, canonical, digest, lock
+from .policy import AnalysisHandoff, DevelopmentPlan, DevelopmentPolicy
 from .review.flue import validate
 from .sandbox.docker import Docker, safe_path
+from .telemetry import ModelLedger
 from .workspace.snapshot import load_candidate, snapshot
 
 
@@ -43,7 +46,17 @@ class Workflow:
             "repairs_used": max(0, len(record["candidates"]) - 1),
             "cost_usd": None,
             "candidate": None,
+            "policy_sha256": record["request"].get("policy_sha256"),
+            "mode": record["request"].get("policy", {}).get("mode", "review"),
+            "plan": record.get("plan"),
         }
+        if (directory / "model-ledger.json").exists():
+            result["accounting"] = ModelLedger(
+                directory,
+                max_requests=record["request"]["max_requests"],
+                max_tokens=record["request"]["max_total_tokens"],
+                deadline=record["deadline"],
+            ).summary()
         if record["candidates"]:
             result["candidate"] = Workbench(directory / "evidence").inspect(
                 record["candidates"][-1]
@@ -70,17 +83,27 @@ class Workflow:
         directory = self.directory(key)
         with lock(directory / "dispatch.lock", timeout=15):
             record = json.loads((directory / "job.json").read_bytes())
-            if record["state"] in ("ready_local", "cancelled"):
+            if record["state"] in ("ready_local", "verified_local", "cancelled"):
                 return self.inspect(key)
             atomic_write(directory / "cancel", b"requested\n")
         active = record.get("active")
-        if active and active["kind"] == "agent":
+        if active and active["kind"] in ("agent", "agents"):
             agent = AgentRun(directory / "agents", image=record["request"]["image"])
-            target = directory / "agents" / digest(active["key"].encode())
-            # A tombstone also covers cancellation between job intent and agent launch.
-            atomic_write(target / "cancel", b"requested\n")
-            if (target / "intent.json").exists():
-                agent.cancel(active["key"])
+            keys = active.get("keys", [active.get("key")])
+            for active_key in keys:
+                target = directory / "agents" / digest(active_key.encode())
+                # A tombstone also covers cancellation between job intent and agent launch.
+                atomic_write(target / "cancel", b"requested\n")
+            failures = []
+            for active_key in keys:
+                target = directory / "agents" / digest(active_key.encode())
+                if (target / "intent.json").exists():
+                    try:
+                        agent.cancel(active_key)
+                    except Exception as exc:
+                        failures.append(type(exc).__name__)
+            if failures:
+                raise ValueError("Agent group termination is unconfirmed")
         elif active and active["kind"] == "verify":
             stopped = Docker(
                 directory / "evidence/candidates/containers",
@@ -91,7 +114,7 @@ class Workflow:
         try:
             with lock(directory / "control.lock"):
                 record = json.loads((directory / "job.json").read_bytes())
-                if record["state"] not in ("ready_local", "cancelled"):
+                if record["state"] not in ("ready_local", "verified_local", "cancelled"):
                     record["state"], record["active"] = "cancelled", None
                     self.save(directory, record, "workflow.cancelled")
                 return self.inspect(key)
@@ -112,6 +135,11 @@ class Workflow:
         timeout=600,
         max_requests=30,
         max_repairs=2,
+        max_total_tokens=None,
+        policy=None,
+        trial_ticket_sha256=None,
+        execution_id=None,
+        expected_base_revision=None,
     ):
         if not 1 <= timeout <= 3600 or not 1 <= max_requests <= 90 or not 0 <= max_repairs <= 2:
             raise ValueError("Invalid workflow budget")
@@ -119,6 +147,12 @@ class Workflow:
             raise ValueError("Expected a bounded task and explicit output paths")
         allowed = sorted(set(safe_path(name) for name in allowed))
         reviewer = review_gateway or gateway
+        selected_policy = policy or DevelopmentPolicy()
+        token_limit = max_total_tokens if max_total_tokens is not None else 250000
+        if not 1 <= token_limit <= 1000000:
+            raise ValueError("Invalid total token budget")
+        if bool(trial_ticket_sha256) != bool(execution_id):
+            raise ValueError("Trial ticket and execution identity must be supplied together")
         directory = self.directory(key)
         agents = AgentRun(directory / "agents", image=self.image)
         if not agents.image_configured:
@@ -135,17 +169,39 @@ class Workflow:
             "timeout": timeout,
             "max_requests": max_requests,
             "max_repairs": max_repairs,
+            "max_total_tokens": token_limit,
+            "policy": selected_policy.model_dump(),
+            "policy_sha256": selected_policy.sha256,
+            "trial_ticket_sha256": trial_ticket_sha256,
+            "execution_id": execution_id,
+            "expected_base_revision": expected_base_revision,
         }
         with lock(directory / "control.lock"):
             path = directory / "job.json"
             if path.exists():
                 record = json.loads(path.read_bytes())
+                # Existing v1 jobs retain their original policy and accounting contract.
+                if (
+                    "policy" not in record["request"]
+                    and policy is None
+                    and max_total_tokens is None
+                    and trial_ticket_sha256 is None
+                ):
+                    for field in (
+                        "max_total_tokens",
+                        "policy",
+                        "policy_sha256",
+                        "trial_ticket_sha256",
+                        "execution_id",
+                        "expected_base_revision",
+                    ):
+                        request.pop(field)
                 if record["request"] != request:
                     raise ValueError("Workflow key already has a different request")
                 if record.get("key") is None:
                     record["key"] = key
                     atomic_write(path, canonical(record))
-                if record["state"] in ("ready_local", "cancelled"):
+                if record["state"] in ("ready_local", "verified_local", "cancelled"):
                     return self.inspect(key)
             else:
                 workspace = directory / "snapshots" / str(uuid.uuid4())
@@ -164,7 +220,25 @@ class Workflow:
                     "active": None,
                 }
                 self.save(directory, record, "workflow.created")
+            if (
+                expected_base_revision is not None
+                and record["base"]["base_revision"] != expected_base_revision
+            ):
+                raise ValueError("Source snapshot differs from the reserved trial base")
             bench = Workbench(directory / "evidence")
+            ledger = (
+                ModelLedger(
+                    directory,
+                    max_requests=max_requests,
+                    max_tokens=token_limit,
+                    deadline=record["deadline"],
+                )
+                if "max_total_tokens" in request
+                else None
+            )
+
+            def metered(target, stage, role):
+                return ledger.stage(target, stage, role) if ledger else target
 
             def guard():
                 if (directory / "cancel").exists():
@@ -198,6 +272,132 @@ class Workflow:
             files = record["base"]["files"]
             feedback = ""
             try:
+                planning = ""
+                if selected_policy.mode == "selective":
+                    planned = step(
+                        "planner",
+                        "planning",
+                        lambda cap: agents.run(
+                            "planner",
+                            files,
+                            task
+                            + "\nPlanning contract: "
+                            + canonical(
+                                {
+                                    "snapshot_sha256": digest(canonical(files)),
+                                    "allowed_paths": allowed,
+                                    "max_specialists": selected_policy.max_specialists,
+                                }
+                            ).decode(),
+                            [],
+                            metered(gateway, "planner", "planner"),
+                            role="planner",
+                            max_requests=cap,
+                            absolute_deadline=record["deadline"],
+                        ),
+                        cap=selected_policy.planner_requests,
+                        active={"kind": "agent", "key": "planner"},
+                    )
+                    plan = DevelopmentPlan.model_validate_json(planned["message"]).check(
+                        files, allowed, selected_policy.max_specialists
+                    )
+                    if record.get("plan") != plan.model_dump():
+                        record["plan"] = plan.model_dump()
+                        self.save(directory, record, "plan.validated")
+                    planning = (
+                        "\n\nValidated plan (advisory evidence):\n"
+                        + canonical(plan.model_dump()).decode()
+                    )
+                    if plan.specialists:
+                        specialist_keys = ["specialist-" + item.id for item in plan.specialists]
+
+                        def analyze(cap):
+                            # Each agent owns its receipt; only this thread mutates the workflow.
+                            if cap < len(plan.specialists):
+                                raise ValueError("Insufficient requests for planned analysis")
+                            results = {}
+
+                            def run_specialist(item, allowance):
+                                key = "specialist-" + item.id
+                                inputs = {name: files[name] for name in item.paths}
+                                assignment = {
+                                    **item.model_dump(),
+                                    "specialist_id": item.id,
+                                    "snapshot_sha256": digest(canonical(inputs)),
+                                }
+                                result = agents.run(
+                                    key,
+                                    inputs,
+                                    task
+                                    + "\nAnalysis assignment: "
+                                    + canonical(assignment).decode(),
+                                    [],
+                                    metered(gateway, "analysis", "specialist"),
+                                    role="specialist",
+                                    max_requests=allowance,
+                                    absolute_deadline=record["deadline"],
+                                )
+                                handoff = AnalysisHandoff.model_validate_json(
+                                    result["message"]
+                                ).check(item, inputs)
+                                return {
+                                    "handoff": handoff.model_dump(),
+                                    "model_requests": result["model_requests"],
+                                    "execution_id": result["execution_id"],
+                                }
+
+                            with ThreadPoolExecutor(max_workers=2) as pool:
+                                futures = {
+                                    pool.submit(
+                                        run_specialist,
+                                        item,
+                                        cap // len(plan.specialists)
+                                        + (i < cap % len(plan.specialists)),
+                                    ): item.id
+                                    for i, item in enumerate(plan.specialists)
+                                }
+                                try:
+                                    for future in as_completed(futures):
+                                        results[futures[future]] = future.result()
+                                except BaseException:
+                                    for agent_key in specialist_keys:
+                                        target = directory / "agents" / digest(agent_key.encode())
+                                        atomic_write(
+                                            target / "cancel", b"analysis sibling failed\n"
+                                        )
+                                        if (target / "intent.json").exists() and not (
+                                            target / "result.json"
+                                        ).exists():
+                                            agents.cancel(agent_key)
+                                    raise
+                            return {
+                                "handoffs": results,
+                                "model_requests": sum(
+                                    value["model_requests"] for value in results.values()
+                                ),
+                            }
+
+                        analyses = step(
+                            "analysis",
+                            "analyzing",
+                            analyze,
+                            cap=selected_policy.specialist_requests * len(plan.specialists),
+                            active={"kind": "agents", "keys": specialist_keys},
+                        )
+                        planning += (
+                            "\n\nRead-only handoffs (advisory evidence):\n"
+                            + canonical(
+                                {
+                                    key: value["handoff"]
+                                    for key, value in analyses["handoffs"].items()
+                                }
+                            ).decode()
+                        )
+                coding_task = task + (
+                    "\n\nProduction guidance:\n" + selected_policy.coding_guidance
+                    if selected_policy.coding_guidance
+                    else ""
+                )
                 for attempt in range(max_repairs + 1):
                     agent_key = f"coder-{attempt}"
                     result = step(
@@ -206,14 +406,14 @@ class Workflow:
                         lambda cap: agents.run(
                             agent_key,
                             files,
-                            task + feedback,
+                            coding_task + planning + feedback,
                             allowed,
-                            gateway,
+                            metered(gateway, agent_key, "coder"),
                             timeout=180,
                             max_requests=cap,
                             absolute_deadline=record["deadline"],
                         ),
-                        cap=12,
+                        cap=selected_policy.coder_requests,
                         active={"kind": "agent", "key": agent_key},
                     )
 
@@ -255,6 +455,12 @@ class Workflow:
                         active={"kind": "verify", "key": sha},
                     )
                     clear = False
+                    if checked["passed"] and selected_policy.mode == "single":
+                        with lock(directory / "dispatch.lock", timeout=15):
+                            guard()
+                            record["state"] = "verified_local"
+                            self.save(directory, record, "workflow.verified")
+                        return self.inspect(key)
                     if checked["passed"]:
                         diff = bench.artifacts.get(
                             load_candidate(bench.artifacts, sha)["patch_sha256"]
@@ -271,13 +477,13 @@ class Workflow:
                                 + "\n\n"
                                 + diff.decode(),
                                 [],
-                                reviewer,
+                                metered(reviewer, review_key, "reviewer"),
                                 role="reviewer",
                                 timeout=120,
                                 max_requests=cap,
                                 absolute_deadline=record["deadline"],
                             ),
-                            cap=2,
+                            cap=selected_policy.reviewer_requests,
                             active={"kind": "agent", "key": review_key},
                         )
                         verdict = validate(reviewed["message"].encode(), diff)

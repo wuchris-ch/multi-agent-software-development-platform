@@ -1,6 +1,8 @@
 import json
 import re
 import shlex
+import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -9,8 +11,10 @@ from test_broker import FakeGateway
 from test_snapshot import repository as repository
 
 from swe_platform.candidates import Recipe, Workbench
-from swe_platform.io import canonical
+from swe_platform.io import canonical, digest
+from swe_platform.policy import DevelopmentPolicy
 from swe_platform.sandbox.docker import PYTHON_IMAGE
+from swe_platform.telemetry import execution_trace
 from swe_platform.workflow import Workflow
 
 
@@ -137,6 +141,89 @@ def test_shared_request_budget_cannot_reset_on_resume(repository, tmp_path):  # 
     assert result["state"] == "needs_attention"
     assert result["requests_used_or_reserved"] == len(gateway.requests) == 2
     assert not gateway.reviews
+
+
+def test_single_mode_runs_public_checks_without_creating_review_evidence(repository, tmp_path):
+    gateway = WorkflowGateway()
+    workflow, args = inputs(repository, tmp_path, gateway)
+    result = workflow.run(*args, policy=DevelopmentPolicy.preset("single"))
+    assert result["state"] == "verified_local"
+    assert gateway.starts == 1 and gateway.reviews == 0
+    assert result["candidate"]["evidence"].get("review") is None
+    assert result["accounting"]["model_requests"] == 2
+    before = len(gateway.requests)
+    assert workflow.run(*args, policy=DevelopmentPolicy.preset("single")) == result
+    assert len(gateway.requests) == before
+
+
+def test_selective_flue_plan_uses_two_read_only_specialists_and_one_writer(repository, tmp_path):
+    (repository / "notes.txt").write_text("The consumer expects a numeric value.\n")
+    subprocess.run(["git", "add", "notes.txt"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add consumer context"], cwd=repository, check=True)
+    workflow, _ = inputs(repository, tmp_path, None)
+    barrier = threading.Barrier(2)
+
+    class SelectiveGateway(WorkflowGateway):
+        def request(self, body, deadline):
+            messages = str(body["messages"])
+            source = json.loads((workflow.directory("task") / "job.json").read_bytes())["base"][
+                "files"
+            ]
+            if "You plan a bounded repository" in messages:
+                self.requests.append(body)
+                plan = {
+                    "schema_version": "development-plan/v1",
+                    "snapshot_sha256": digest(canonical(source)),
+                    "summary": "Inspect the value and its consumer separately",
+                    "steps": [
+                        {"id": "change-value", "goal": "Update the value", "paths": ["calc.py"]}
+                    ],
+                    "specialists": [
+                        {"id": "value", "focus": "Check value semantics", "paths": ["calc.py"]},
+                        {
+                            "id": "consumer",
+                            "focus": "Check consumer expectations",
+                            "paths": ["notes.txt"],
+                        },
+                    ],
+                }
+                return FakeGateway(message=json.dumps(plan)).request(body, deadline)
+            if "You are a read-only repository specialist" in messages:
+                self.requests.append(body)
+                assert {tool["function"]["name"] for tool in body["tools"]} == {
+                    "read",
+                    "grep",
+                    "glob",
+                }
+                selected = "consumer" if '"specialist_id":"consumer"' in messages else "value"
+                path = "notes.txt" if selected == "consumer" else "calc.py"
+                barrier.wait(timeout=20)
+                handoff = {
+                    "schema_version": "development-analysis/v1",
+                    "snapshot_sha256": digest(canonical({path: source[path]})),
+                    "specialist_id": selected,
+                    "paths": [path],
+                    "findings": ["The supplied source has a numeric consumer."],
+                    "recommendation": "Preserve numeric behavior.",
+                }
+                return FakeGateway(message=json.dumps(handoff)).request(body, deadline)
+            return super().request(body, deadline)
+
+    gateway = SelectiveGateway()
+    _, args = inputs(repository, tmp_path, gateway)
+    result = workflow.run(*args, policy=DevelopmentPolicy.preset("selective"))
+    assert result["state"] == "ready_local"
+    assert gateway.starts == 1 and gateway.reviews == 1
+    assert len(result["steps"]["analysis"]["result"]["handoffs"]) == 2
+    assert result["accounting"]["model_requests"] == len(gateway.requests) == 6
+    assert result["accounting"]["unresolved_calls"] == 0
+    trace = execution_trace(workflow.directory("task"))
+    assert len([span for span in trace["spans"] if span["kind"] == "model"]) == 6
+    assert any(span["kind"] == "tool" for span in trace["spans"])
+    assert "Preserve numeric behavior." not in json.dumps(trace)
+    assert workflow.run(*args, policy=DevelopmentPolicy.preset("selective")) == result
+    assert len(gateway.requests) == 6
+    assert (repository / "calc.py").read_text() == "value = 1\n"
 
 
 def test_workflow_cancel_stops_active_agent_and_prevents_next_stage(repository, tmp_path):  # noqa: F811

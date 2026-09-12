@@ -1,21 +1,22 @@
 import fs from 'node:fs';
 import { init } from '@flue/runtime';
 import { start } from '@flue/runtime/node';
-import { CodingAgent, ReviewAgent } from './roles.mjs';
+import { CodingAgent, ReviewAgent, PlanningAgent, SpecialistAgent } from './roles.mjs';
 import { createGateway } from './provider.mjs';
 
 const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
 let runtime;
 let agent;
 try {
-  if (!['coder', 'reviewer'].includes(spec.role)) throw new Error('Invalid role');
+  const roles = { coder: CodingAgent, reviewer: ReviewAgent, planner: PlanningAgent, specialist: SpecialistAgent };
+  if (!Object.hasOwn(roles, spec.role)) throw new Error('Invalid role');
   const remaining = Math.floor(spec.deadline * 1000 - Date.now());
   if (remaining <= 0) throw new Error('Deadline expired');
   runtime = await start({
-    agents: [CodingAgent, ReviewAgent],
+    agents: Object.values(roles),
     providers: [createGateway(spec.base_url, spec.role)], env: {},
   });
-  agent = init(spec.role === 'coder' ? CodingAgent : ReviewAgent);
+  agent = init(roles[spec.role]);
   const receipt = await agent.dispatch(spec.task);
   const reply = await agent.read(receipt, { signal: AbortSignal.timeout(remaining) });
   if (!reply.text.trim() || Buffer.byteLength(reply.text) > 256 * 1024) {

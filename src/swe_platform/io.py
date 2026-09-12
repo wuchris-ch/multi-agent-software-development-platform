@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 def canonical(value) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def digest(data: bytes) -> str:

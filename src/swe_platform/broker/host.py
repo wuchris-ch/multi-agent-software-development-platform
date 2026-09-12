@@ -18,6 +18,14 @@ from ..sandbox.docker import PYTHON_IMAGE, Docker, safe_path
 AGENT_VERSION = "flue/2.0.3"
 
 
+def role_tools(role):
+    if role not in ("coder", "reviewer", "planner", "specialist"):
+        raise ValueError("Unknown agent role")
+    if role == "coder":
+        return {"read", "write", "edit", "bash", "grep", "glob"}
+    return set() if role == "reviewer" else {"read", "grep", "glob"}
+
+
 class AttachedOutput:
     """Drain attach output immediately, including while Docker confirms startup."""
 
@@ -99,8 +107,7 @@ class BrokerPolicy:
     """Every frame is untrusted, including frames spoofed by arbitrary worker code."""
 
     def __init__(self, model, *, deadline, max_requests=12, max_output_tokens=4096, role="coder"):
-        if role not in ("coder", "reviewer"):
-            raise ValueError("Unknown agent role")
+        role_tools(role)
         self.role = role
         self.model = model
         self.deadline = deadline
@@ -146,9 +153,7 @@ class BrokerPolicy:
             raise ValueError("Invalid model messages")
         if not isinstance(body.get("tools", []), list):
             raise ValueError("Invalid tool definitions")
-        permitted = (
-            {"read", "write", "edit", "bash", "grep", "glob"} if self.role == "coder" else set()
-        )
+        permitted = role_tools(self.role)
         for tool in body.get("tools", []):
             if (
                 not isinstance(tool, dict)
@@ -200,7 +205,7 @@ def mask_model_metadata(raw, content_type):
 
 def validate_reply_tools(raw, content_type, role):
     """Reject unsolicited tools even if a runtime has additional built-ins registered."""
-    permitted = {"read", "write", "edit", "bash", "grep", "glob"} if role == "coder" else set()
+    permitted = role_tools(role)
     names = {}
     if "text/event-stream" in content_type:
         values = [
@@ -298,7 +303,8 @@ class AgentRun:
         role="coder",
         absolute_deadline=None,
     ):
-        if role not in ("coder", "reviewer") or (role == "reviewer" and (files or allowed)):
+        role_tools(role)
+        if (role == "reviewer" and files) or (role != "coder" and allowed):
             raise ValueError("Invalid agent role or reviewer capabilities")
         if not self.image_configured:
             raise ValueError(

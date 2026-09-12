@@ -5,7 +5,7 @@ def capabilities():
     return {
         "adapter": "flue-result/v1",
         "runtime_version": "2.0.3",
-        "roles": ["coder", "reviewer"],
+        "roles": ["coder", "reviewer", "planner", "specialist"],
         "transport": "model gateway through a bounded host broker",
         "usage": "tokens_if_reported; cost_unknown",
     }

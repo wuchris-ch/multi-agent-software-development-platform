@@ -2,6 +2,7 @@ import { createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 
 export const CODING_TOOLS = new Set(['read', 'write', 'edit', 'bash', 'grep', 'glob']);
+export const ANALYSIS_TOOLS = new Set(['read', 'grep', 'glob']);
 
 // The private upstream provider is selected by the trusted broker. Flue sees an alias.
 export function createGateway(baseUrl, role) {
@@ -10,7 +11,8 @@ export function createGateway(baseUrl, role) {
       || url.pathname !== '/v1' || url.username || url.password || url.search || url.hash) {
     throw new Error('Expected the local model broker');
   }
-  if (!['coder', 'reviewer'].includes(role)) throw new Error('Unknown agent role');
+  if (!['coder', 'reviewer', 'planner', 'specialist'].includes(role)) throw new Error('Unknown agent role');
+  const allowed = role === 'coder' ? CODING_TOOLS : role === 'reviewer' ? new Set() : ANALYSIS_TOOLS;
   const api = openAICompletionsApi();
   const options = (supplied = {}) => ({
     ...supplied, temperature: 0, maxTokens: 4096, timeoutMs: 45_000,
@@ -24,7 +26,7 @@ export function createGateway(baseUrl, role) {
   });
   const context = (value) => ({
     ...value,
-    tools: role === 'coder' ? (value.tools ?? []).filter(tool => CODING_TOOLS.has(tool.name)) : [],
+    tools: (value.tools ?? []).filter(tool => allowed.has(tool.name)),
   });
   return createProvider({
     id: 'model-gateway',

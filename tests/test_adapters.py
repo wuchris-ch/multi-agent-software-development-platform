@@ -119,7 +119,7 @@ def test_flue_completion_and_role_binding():
             flue.collect(invalid, code)
     with pytest.raises(ValueError, match="completion"):
         flue.collect(raw, 0, role="reviewer")
-    assert flue.capabilities()["roles"] == ["coder", "reviewer"]
+    assert flue.capabilities()["roles"] == ["coder", "reviewer", "planner", "specialist"]
 
 
 def test_bounded_adapter_process():

@@ -11,6 +11,7 @@ from .candidates import Recipe, Workbench
 from .io import atomic_write, canonical, digest
 from .models import StrictModel
 from .review.flue import validate
+from .telemetry import execution_trace
 from .workspace.snapshot import MAX_BYTES, MAX_FILES, load_candidate
 
 MAX_BUNDLE_BYTES = 32 * 1024 * 1024
@@ -69,7 +70,8 @@ class Bundle(StrictModel):
     review: dict | None
     # Explicitly selected metadata never includes prompts, profiles, source paths, or worker files.
     run: RunMetadata
-    artifacts: dict[str, str] = Field(max_length=3)
+    trace_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    artifacts: dict[str, str] = Field(max_length=4)
 
 
 class BundleArtifacts:
@@ -127,6 +129,8 @@ def export_workflow(directory: Path) -> bytes:
             {key: event[key] for key in ("seq", "at", "event")} for event in record["events"]
         ],
     }
+    trace = canonical(execution_trace(directory))
+    trace_sha = digest(trace)
     bundle = Bundle(
         candidate_sha256=sha,
         base_revision=candidate["base_revision"],
@@ -135,8 +139,13 @@ def export_workflow(directory: Path) -> bytes:
         verification=verification,
         review=evidence.get("review", {}).get("verdict"),
         run=run,
+        trace_sha256=trace_sha,
         artifacts={
-            key: base64.b64encode(bench.artifacts.get(key)).decode() for key in sorted(artifacts)
+            trace_sha: base64.b64encode(trace).decode(),
+            **{
+                key: base64.b64encode(bench.artifacts.get(key)).decode()
+                for key in sorted(artifacts)
+            },
         },
     )
     raw = canonical(bundle.model_dump())
@@ -170,6 +179,14 @@ def verify_bundle(raw: bytes, *, expected_sha256: str | None = None):
     if set(candidate["changed_paths"]) - set(bundle.allowed_paths):
         raise ValueError("Evidence candidate exceeds the allowed scope")
     expected_artifacts = {bundle.candidate_sha256, candidate["patch_sha256"]}
+    if bundle.trace_sha256:
+        trace = json.loads(artifacts.get(bundle.trace_sha256))
+        if (
+            trace.get("schema_version") != "development-trace/v1"
+            or trace.get("workflow_id") != bundle.run.workflow_id
+        ):
+            raise ValueError("Trace belongs to another workflow")
+        expected_artifacts.add(bundle.trace_sha256)
     checked = False
     if report := bundle.verification:
         if report.candidate != bundle.candidate_sha256:

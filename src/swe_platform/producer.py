@@ -143,7 +143,7 @@ class ProducerRequest(StrictModel):
     review_profile: Path | None = None
     image: str = Field(pattern=r"^(?:sha256:[a-f0-9]{64}|[^\s]+@sha256:[a-f0-9]{64})$")
     policy: DevelopmentPolicy = Field(default_factory=DevelopmentPolicy)
-    producer_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    producer_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     timeout: int = Field(default=600, ge=1, le=3600)
     max_requests: int = Field(default=30, ge=1, le=90)
     max_total_tokens: int = Field(default=250000, ge=1, le=1000000)
@@ -205,6 +205,48 @@ BINDINGS = (
     "policy_sha256",
     "evaluator_sha256",
 )
+
+
+def cached_assessment(directory):
+    path = directory / "producer/assessment.json"
+    if not path.exists():
+        return None
+    assessment = validate_wire("Assessment", json.loads(path.read_bytes()))
+    submission = validate_wire(
+        "Submission", json.loads((directory / "producer/submission.json").read_bytes())
+    )
+    admission = json.loads((directory / "producer/admission.json").read_bytes())
+    record = json.loads((directory / "job.json").read_bytes())
+    if (
+        not record["candidates"]
+        or record["candidates"][-1] != assessment["candidate_manifest_sha256"]
+    ):
+        raise ValueError("Independent assessment belongs to a superseded candidate")
+    if (
+        any(
+            assessment[field] != submission[field]
+            for field in (*IDENTITY, *BINDINGS, "execution_contract_sha256")
+        )
+        or assessment["submission_sha256"] != digest(canonical(submission))
+        or assessment["trial_ticket_sha256"] != digest(canonical(admission["ticket"]))
+    ):
+        raise ValueError("Independent assessment evidence changed")
+    if any(
+        assessment[field] != admission["ticket"][field]
+        for field in (
+            "execution_id",
+            "recipe_sha256",
+            "suite_sha256",
+            "policy_sha256",
+            "evaluator_sha256",
+        )
+    ):
+        raise ValueError("Independent assessment differs from its reserved authority")
+    if assessment["outcome"] == "pass" and (
+        not assessment["checks"] or not all(check["passed"] for check in assessment["checks"])
+    ):
+        raise ValueError("Independent assessment contradicts its checks")
+    return assessment
 
 
 def immutable(path, value):
@@ -313,6 +355,73 @@ class Producer:
             "candidate_manifest_sha256": sha,
         }
 
+    def _artifacts(self, directory, binding):
+        bench = Workbench(directory / "evidence")
+        sha = binding["candidate_manifest_sha256"]
+        artifacts = Artifacts(directory / "producer/artifacts")
+        path = directory / "producer/prepared.json"
+        if path.exists():
+            saved = json.loads(path.read_bytes())
+            if saved["binding"] != binding:
+                raise ValueError("Uploaded evidence belongs to a different candidate")
+            return saved["artifacts"]
+        candidate = load_candidate(bench.artifacts, sha)
+        public = bench.inspect(sha)["evidence"]
+        contents = {
+            "candidate": bench.artifacts.get(sha),
+            "patch": bench.artifacts.get(candidate["patch_sha256"]),
+            "trace": canonical(execution_trace(directory)),
+        }
+        if public.get("verification"):
+            contents["public-verification"] = canonical(public["verification"])
+        if public.get("review"):
+            contents["review"] = canonical(public["review"])
+        refs = []
+        for role, raw in contents.items():
+            envelope = validate_wire(
+                "ArtifactEnvelope",
+                {
+                    "schema_version": "agent-eval.artifact/v2",
+                    "encoding": "base64",
+                    "content_sha256": digest(raw),
+                    "data": base64.b64encode(raw).decode(),
+                },
+            )
+            stored = artifacts.put(canonical(envelope))
+            refs.append({"role": role, "sha256": digest(raw), "storage_key": stored})
+        immutable(path, {"binding": binding, "artifacts": refs})
+        return refs
+
+    def _upload(self, directory, refs):
+        artifacts = Artifacts(directory / "producer/artifacts")
+        for ref in refs:
+            envelope = json.loads(artifacts.get(ref["storage_key"]))
+            reply = self.client.call("/v1/producer-artifacts", envelope)
+            if reply != {"sha256": ref["sha256"], "storage_key": ref["storage_key"]}:
+                raise ValueError("Evaluator changed an artifact identity")
+
+    def upload(self, key):
+        directory = self.directory(key)
+        with lock(directory / "producer.lock", timeout=15), lock(directory / "control.lock"):
+            self.client.verify_authority()
+            binding = self.binding(key)
+            validate_wire("ExecutionContract", binding)
+            record = json.loads((directory / "job.json").read_bytes())
+            if record["state"] not in (
+                "ready_local",
+                "verified_local",
+                "needs_attention",
+                "cancelled",
+            ):
+                raise ValueError("Wait for production to finish before uploading evidence")
+            refs = self._artifacts(directory, binding)
+            self._upload(directory, refs)
+            return {
+                "state": "artifacts_registered",
+                "candidate_binding": binding,
+                "artifacts": refs,
+            }
+
     def submit(self, key):
         directory = self.directory(key)
         with lock(directory / "producer.lock", timeout=15):
@@ -324,39 +433,13 @@ class Producer:
             if canonical(contract) != canonical(binding):
                 raise ValueError("Issued execution contract does not bind the current candidate")
             record = json.loads((directory / "job.json").read_bytes())
-            bench = Workbench(directory / "evidence")
-            sha = binding["candidate_manifest_sha256"]
-            artifacts = Artifacts(directory / "producer/artifacts")
             outbox = directory / "producer/submission.json"
             if outbox.exists():
                 submission = json.loads(outbox.read_bytes())
                 if any(submission[field] != binding[field] for field in (*IDENTITY, *BINDINGS)):
                     raise ValueError("Prepared submission belongs to a different candidate")
             else:
-                candidate = load_candidate(bench.artifacts, sha)
-                public = bench.inspect(sha)["evidence"]
-                contents = {
-                    "candidate": bench.artifacts.get(sha),
-                    "patch": bench.artifacts.get(candidate["patch_sha256"]),
-                    "trace": canonical(execution_trace(directory)),
-                }
-                if public.get("verification"):
-                    contents["public-verification"] = canonical(public["verification"])
-                if public.get("review"):
-                    contents["review"] = canonical(public["review"])
-                refs = []
-                for role, raw in contents.items():
-                    envelope = validate_wire(
-                        "ArtifactEnvelope",
-                        {
-                            "schema_version": "agent-eval.artifact/v2",
-                            "encoding": "base64",
-                            "content_sha256": digest(raw),
-                            "data": base64.b64encode(raw).decode(),
-                        },
-                    )
-                    stored = artifacts.put(canonical(envelope))
-                    refs.append({"role": role, "sha256": digest(raw), "storage_key": stored})
+                refs = self._artifacts(directory, binding)
                 usage = Workflow(self.root).inspect(key).get("accounting", {})
                 submission = validate_wire(
                     "Submission",
@@ -381,11 +464,7 @@ class Producer:
                     },
                 )
                 immutable(outbox, submission)
-            for ref in submission["artifacts"]:
-                envelope = json.loads(artifacts.get(ref["storage_key"]))
-                reply = self.client.call("/v1/producer-artifacts", envelope)
-                if reply != {"sha256": ref["sha256"], "storage_key": ref["storage_key"]}:
-                    raise ValueError("Evaluator changed an artifact identity")
+            self._upload(directory, submission["artifacts"])
             # The evaluator stores this execution ID immutably; identical retries are idempotent.
             receipt = self.client.call("/v1/submissions", submission)
             expected = {

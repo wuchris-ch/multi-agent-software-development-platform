@@ -313,7 +313,7 @@ class AgentRun:
         if (
             not key
             or len(key) > 200
-            or not 1 <= len(task.encode()) <= (16000 if role == "coder" else 128 * 1024)
+            or not 1 <= len(task.encode()) <= (64 * 1024 if role == "coder" else 128 * 1024)
         ):
             raise ValueError("Invalid coding job identity or task")
         if not 1 <= timeout <= 1200 or not 1 <= max_requests <= 30:

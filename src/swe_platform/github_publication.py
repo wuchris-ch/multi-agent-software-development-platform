@@ -15,6 +15,7 @@ from .candidates import Workbench
 from .github import GitHub
 from .io import atomic_write, canonical, digest, lock
 from .models import StrictModel
+from .producer import cached_assessment
 from .sandbox.docker import safe_path
 from .workspace.snapshot import load_candidate
 
@@ -176,6 +177,14 @@ class Publisher:
             "allowed": policy["allowed_paths"],
             "evidence": inspected["evidence"],
         }
+        workflow = self.root.parent.parent
+        if (workflow / "producer/admission.json").exists():
+            assessment = cached_assessment(workflow)
+            if assessment is None or assessment["outcome"] != "pass":
+                raise ValueError(
+                    "Reserved evaluation must accept this candidate before publication"
+                )
+            value["independent_assessment_sha256"] = digest(canonical(assessment))
         return digest(canonical(value))
 
     def prepare(self, sha, repository, *, branch, title, body, base_branch=None, lifetime=86400):

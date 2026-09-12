@@ -120,6 +120,19 @@ def test_submission_is_not_acceptance_and_lost_intake_receipt_reuses_exact_outbo
     assert producer.assessment(key) == accepted
 
 
+def test_artifacts_upload_before_operator_can_issue_a_contract(console):
+    producer, client, key, directory = prepared(console)
+    contract = client.contract
+    client.contract = None
+    uploaded = producer.upload(key)
+    assert uploaded["state"] == "artifacts_registered"
+    assert uploaded["candidate_binding"] == contract
+    assert len(client.artifacts) == 5 and client.submitted is None
+    assert not (directory / "producer/submission.json").exists()
+    client.contract = contract
+    assert producer.submit(key)["state"] == "awaiting_independent_evaluation"
+
+
 @pytest.mark.parametrize(
     "field",
     [

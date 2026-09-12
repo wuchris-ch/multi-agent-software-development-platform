@@ -55,4 +55,6 @@ Repeated authenticated assessment retrieval preserved the same identities and re
 
 Production policies are compared within matched task pairs using the same model configuration, tool capabilities and total budgets. Different task families can have different public recipes and write scopes. A frozen promotion gate enumerates every task, repetition and arm; missing or duplicate attempts cannot disappear from its denominator.
 
+Initial comparison recipes set `max_repairs` to zero. Any assisted correction has its own linked ticket and stays outside the initial paired denominator. Duplicate initial admissions are rejected even when one failed before a workflow began.
+
 Development comparisons must pass before held-out task families begin. The held-out families are disjoint from development. The policy miner reads development traces only and cannot use hidden tests or alter the evaluator's acceptance policy. Promotion requires complete paired evidence, the declared development gain and no passing-baseline regression in either split. Rollout and rollback compare both policy identity and generation before updating the active pointer.

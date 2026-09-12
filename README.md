@@ -1,5 +1,7 @@
 # Multi-agent software engineering platform
 
+[![Verification](https://github.com/wuchris-ch/multi-agent-software-engineering-platform/actions/workflows/verify.yml/badge.svg)](https://github.com/wuchris-ch/multi-agent-software-engineering-platform/actions/workflows/verify.yml)
+
 Turn a repository task into an inspectable patch, with isolated coding, independent review, and evidence tied to the exact candidate.
 
 The platform coordinates a coding worker and a fresh Flue reviewer. Python, SQLite, and Docker handle execution, recovery, and verification. Candidate workspaces contain repository content; model credentials stay on the host in macOS Keychain.
@@ -52,6 +54,8 @@ uv run swe-platform candidate inspect <candidate-digest>
 To start with an existing patch, use `candidate import /path/to/repo change.patch recipe.json --allow src/calculator.py`. Use `candidate repair <digest> replacement.patch` for a revised patch against the original base. Each revision gets fresh evidence.
 
 ## Verified examples
+
+A disposable GitHub exercise took a batching bug from a failing baseline to a reviewed draft PR. The unchanged candidate passed 14 frozen repository tests, five independent checks, and GitHub CI. A repeated coding command reused the saved result.
 
 A local Flue watcher candidate reproduced six stale-review races against a fake GitHub server. All six failed against the original code; the candidate passed 74 tests, TypeScript checks, and a fresh Flue review. A live brokered Codex run also fixed a calculator fixture, which passed verification in a separate container. See the [verification record](VERIFICATION.md) for versions, scope, and reproducible checks.
 

@@ -365,10 +365,20 @@ class Workflow:
                                         atomic_write(
                                             target / "cancel", b"analysis sibling failed\n"
                                         )
+                                    failures = []
+                                    for agent_key in specialist_keys:
+                                        target = directory / "agents" / digest(agent_key.encode())
                                         if (target / "intent.json").exists() and not (
                                             target / "result.json"
                                         ).exists():
-                                            agents.cancel(agent_key)
+                                            try:
+                                                agents.cancel(agent_key)
+                                            except Exception as exc:
+                                                failures.append(type(exc).__name__)
+                                    if failures:
+                                        raise ValueError(
+                                            "Analysis group termination is unconfirmed"
+                                        ) from None
                                     raise
                             return {
                                 "handoffs": results,

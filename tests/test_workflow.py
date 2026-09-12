@@ -11,11 +11,12 @@ from test_broker import FakeGateway
 from test_snapshot import repository as repository
 
 from swe_platform.candidates import Recipe, Workbench
-from swe_platform.io import canonical, digest
+from swe_platform.io import atomic_write, canonical, digest
 from swe_platform.policy import DevelopmentPolicy
 from swe_platform.sandbox.docker import PYTHON_IMAGE
 from swe_platform.telemetry import execution_trace
 from swe_platform.workflow import Workflow
+from swe_platform.workspace.snapshot import git
 
 
 class WorkflowGateway(FakeGateway):
@@ -237,6 +238,76 @@ def test_selective_flue_plan_uses_two_read_only_specialists_and_one_writer(repos
     assert workflow.run(*args, policy=DevelopmentPolicy.preset("selective")) == result
     assert len(gateway.requests) == 6
     assert (repository / "calc.py").read_text() == "value = 1\n"
+
+
+def test_analysis_failure_fences_all_siblings_even_if_one_stop_fails(
+    repository, tmp_path, monkeypatch
+):
+    (repository / "notes.txt").write_text("Consumer context\n")
+    git(repository, "add", "notes.txt")
+    git(
+        repository,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-qm",
+        "Add analysis fixture",
+    )
+    workflow, args = inputs(repository, tmp_path, WorkflowGateway())
+    barrier, released = threading.Barrier(2), threading.Event()
+    stopped = []
+    identities = ["specialist-code", "specialist-notes"]
+
+    def run(agent, key, files, task, allowed, gateway, *, role="coder", **kwargs):
+        if role == "planner":
+            plan = {
+                "schema_version": "development-plan/v1",
+                "snapshot_sha256": digest(canonical(files)),
+                "summary": "Inspect two separate source files",
+                "steps": [{"id": "value", "goal": "Correct the value", "paths": ["calc.py"]}],
+                "specialists": [
+                    {"id": "code", "focus": "Inspect value", "paths": ["calc.py"]},
+                    {"id": "notes", "focus": "Inspect consumer", "paths": ["notes.txt"]},
+                ],
+            }
+            return {"message": json.dumps(plan), "model_requests": 1}
+        assert role == "specialist", "Coding must not begin after failed analysis"
+        atomic_write(agent.root / digest(key.encode()) / "intent.json", b"{}")
+        barrier.wait(timeout=5)
+        if key == identities[0]:
+            raise ValueError("Analysis failed")
+        released.wait(timeout=3)
+        return {
+            "message": json.dumps(
+                {
+                    "schema_version": "development-analysis/v1",
+                    "snapshot_sha256": digest(canonical(files)),
+                    "specialist_id": "notes",
+                    "paths": ["notes.txt"],
+                    "findings": [],
+                    "recommendation": "Preserve behavior",
+                }
+            ),
+            "model_requests": 1,
+            "execution_id": digest(key.encode()),
+        }
+
+    def cancel(agent, key):
+        assert all((agent.root / digest(item.encode()) / "cancel").exists() for item in identities)
+        stopped.append(key)
+        if key == identities[0]:
+            raise OSError("Container stop unavailable")
+        released.set()
+
+    monkeypatch.setattr("swe_platform.workflow.AgentRun.run", run)
+    monkeypatch.setattr("swe_platform.workflow.AgentRun.cancel", cancel)
+    with pytest.raises(ValueError, match="group termination is unconfirmed"):
+        workflow.run(*args, policy=DevelopmentPolicy.preset("selective"))
+    assert stopped == identities
+    assert released.is_set()
+    assert workflow.inspect("task")["state"] == "needs_attention"
 
 
 def test_workflow_cancel_stops_active_agent_and_prevents_next_stage(repository, tmp_path):  # noqa: F811

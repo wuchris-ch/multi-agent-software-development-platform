@@ -188,22 +188,22 @@ class PolicyRegistry:
             for trial in range(1, case.trials + 1)
             for arm in ("baseline", "candidate")
         }
-        observations = {}
+        observations, admitted = {}, set()
         for path in sorted(self.workflows.glob("*/producer/admission.json")):
             admission = json.loads(path.read_bytes())
             ticket = admission["ticket"]
             trial = ticket["trial_identity"]
             if trial["cohort_id"] != gate.cohort_id or trial["split"] != split:
                 continue
+            # Assisted executions remain in the journal, outside the initial paired denominator.
+            if trial["attempt_kind"] != "initial":
+                continue
             key = (trial["task_id"], trial["trial"], trial["arm"])
-            if (
-                key not in expected
-                or trial["family"] != expected[key].family
-                or trial["attempt_kind"] != "initial"
-            ):
+            if key not in expected or trial["family"] != expected[key].family:
                 raise ValueError("Trial is outside the frozen comparison")
-            if key in observations:
+            if key in admitted:
                 raise ValueError("Comparison contains duplicate attempts")
+            admitted.add(key)
             directory = path.parent.parent
             if not (directory / "job.json").exists():
                 continue
@@ -219,6 +219,8 @@ class PolicyRegistry:
             recipe = admission["recipe"]
             if digest(canonical(recipe)) != ticket["recipe_sha256"]:
                 raise ValueError("Trial production recipe changed")
+            if recipe["budget"]["max_repairs"] != 0:
+                raise ValueError("Initial comparison trials must disable internal repairs")
             assessment_path = directory / "producer/assessment.json"
             outcome, assessment_sha = None, None
             if assessment_path.exists():

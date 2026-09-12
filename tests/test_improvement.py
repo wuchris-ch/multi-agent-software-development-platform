@@ -1,4 +1,5 @@
 import json
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -63,7 +64,7 @@ def trial(root, gate, *, split, number, arm, outcome, capability="c" * 64):
             "max_model_requests": 30,
             "max_total_tokens": 250000,
             "max_elapsed_seconds": 600,
-            "max_repairs": 2,
+            "max_repairs": 0,
         },
     }
     ticket["recipe_sha256"] = digest(canonical(recipe))
@@ -196,3 +197,42 @@ def test_policy_mining_never_reads_held_out_traces(tmp_path):
     proposed = registry.policy(result["candidate_sha256"])
     assert proposed.mode == "review" and "frozen public verification" in proposed.coding_guidance
     assert registry.active()["policy_sha256"] == gate.baseline_sha256
+
+
+def test_initial_gate_keeps_assisted_results_outside_its_denominator(tmp_path):
+    registry, gate, sha = setup_gate(tmp_path)
+    development(tmp_path, gate)
+    initial = next((tmp_path / "workflows").glob("*/producer/admission.json"))
+    assisted = json.loads(initial.read_bytes())
+    assisted["ticket"]["trial_identity"]["attempt_kind"] = "assisted"
+    assisted["ticket"]["trial_identity"]["parent_execution_id"] = assisted["ticket"]["execution_id"]
+    assisted["ticket"]["execution_id"] = str(uuid.uuid4())
+    atomic_write(
+        tmp_path / "workflows" / ("0" * 64) / "producer/admission.json", canonical(assisted)
+    )
+    result = registry.evaluate(sha, "development")
+    assert result["state"] == "passed" and result["completed_pairs"] == 2
+    assert result["candidate_passes"] == 2 and result["baseline_passes"] == 1
+
+
+def test_duplicate_admission_cannot_disappear_when_its_job_never_started(tmp_path):
+    registry, gate, sha = setup_gate(tmp_path)
+    development(tmp_path, gate)
+    initial = next((tmp_path / "workflows").glob("*/producer/admission.json"))
+    destination = tmp_path / "workflows" / ("0" * 64) / "producer/admission.json"
+    destination.parent.mkdir(parents=True)
+    shutil.copyfile(initial, destination)
+    with pytest.raises(ValueError, match="duplicate attempts"):
+        registry.evaluate(sha, "development")
+
+
+def test_initial_comparison_rejects_recipes_that_hide_repairs(tmp_path):
+    registry, gate, sha = setup_gate(tmp_path)
+    directory = trial(tmp_path, gate, split="development", number=1, arm="baseline", outcome="pass")
+    path = directory / "producer/admission.json"
+    admission = json.loads(path.read_bytes())
+    admission["recipe"]["budget"]["max_repairs"] = 1
+    admission["ticket"]["recipe_sha256"] = digest(canonical(admission["recipe"]))
+    atomic_write(path, canonical(admission))
+    with pytest.raises(ValueError, match="disable internal repairs"):
+        registry.evaluate(sha, "development")

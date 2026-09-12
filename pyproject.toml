@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "swe-platform"
 version = "0.1.0"
 description = "Durable local software engineering jobs with inspectable evidence"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.12,<3", "typer>=0.19,<1"]
 

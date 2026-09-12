@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from swe_platform.sandbox.docker import Docker
 from swe_platform.service import request
 
 
@@ -62,7 +63,7 @@ class ServiceProcess:
 @pytest.fixture
 def service():
     # macOS AF_UNIX path limit is 104 bytes; pytest's default path can exceed it.
-    with tempfile.TemporaryDirectory(prefix="swe-test-", dir="/private/tmp") as tmp:
+    with tempfile.TemporaryDirectory(prefix="swe-test-", dir="/tmp") as tmp:
         svc = ServiceProcess(Path(tmp)).start()
         try:
             yield svc
@@ -77,4 +78,9 @@ def service():
                     for j in svc.call("status")
                 )
             )
+            docker = Docker(svc.root / "containers")
+            for job in svc.call("status"):
+                if '"docker-scripted"' in job["payload"]:
+                    for attempt in svc.call("inspect", job_id=job["id"])["attempts"]:
+                        docker.remove(attempt["id"])
             svc.stop()

@@ -68,10 +68,11 @@ class Workflow:
 
     def cancel(self, key):
         directory = self.directory(key)
-        record = json.loads((directory / "job.json").read_bytes())
-        if record["state"] in ("ready_local", "cancelled"):
-            return self.inspect(key)
-        atomic_write(directory / "cancel", b"requested\n")
+        with lock(directory / "dispatch.lock", timeout=15):
+            record = json.loads((directory / "job.json").read_bytes())
+            if record["state"] in ("ready_local", "cancelled"):
+                return self.inspect(key)
+            atomic_write(directory / "cancel", b"requested\n")
         active = record.get("active")
         if active and active["kind"] == "agent":
             agent = AgentRun(directory / "agents", image=record["request"]["image"])
@@ -81,10 +82,21 @@ class Workflow:
             if (target / "intent.json").exists():
                 agent.cancel(active["key"])
         elif active and active["kind"] == "verify":
-            Docker(
+            stopped = Docker(
                 directory / "evidence/candidates/containers",
                 image=record["request"]["recipe"]["image"],
             ).cancel(active["key"])
+            if not stopped:
+                raise ValueError("Verification termination is unconfirmed")
+        try:
+            with lock(directory / "control.lock"):
+                record = json.loads((directory / "job.json").read_bytes())
+                if record["state"] not in ("ready_local", "cancelled"):
+                    record["state"], record["active"] = "cancelled", None
+                    self.save(directory, record, "workflow.cancelled")
+                return self.inspect(key)
+        except BlockingIOError:
+            pass  # The running coordinator confirms cancellation after its active stage exits.
         return {"key": key, "state": "cancellation_requested"}
 
     def run(
@@ -130,6 +142,9 @@ class Workflow:
                 record = json.loads(path.read_bytes())
                 if record["request"] != request:
                     raise ValueError("Workflow key already has a different request")
+                if record.get("key") is None:
+                    record["key"] = key
+                    atomic_write(path, canonical(record))
                 if record["state"] in ("ready_local", "cancelled"):
                     return self.inspect(key)
             else:
@@ -137,6 +152,7 @@ class Workflow:
                 base = snapshot(source, workspace)
                 record = {
                     "schema_version": "development-workflow/v1",
+                    "key": key,
                     "request": request,
                     "state": "queued",
                     "base": base,
@@ -157,18 +173,22 @@ class Workflow:
                     raise ValueError("Workflow deadline exhausted")
 
             def step(name, state, operation, *, cap=0, active=None):
-                guard()
-                previous = record["steps"].get(name)
-                if previous and "result" in previous:
-                    return previous["result"]
-                if previous is None:
-                    allowance = min(cap, max_requests - self.spent(record))
-                    if cap and allowance < 1:
-                        raise ValueError("Workflow model request budget exhausted")
-                    previous = {"reserved_requests": allowance}
-                    record["steps"][name] = previous
+                with lock(directory / "dispatch.lock", timeout=15):
+                    guard()
+                    previous = record["steps"].get(name)
+                    if previous and "result" in previous:
+                        return previous["result"]
+                    if previous is None:
+                        allowance = min(cap, max_requests - self.spent(record))
+                        if cap and allowance < 1:
+                            raise ValueError("Workflow model request budget exhausted")
+                        previous = {"reserved_requests": allowance}
+                        record["steps"][name] = previous
+                        event = name + ".intent"
+                    else:
+                        event = name + ".resuming"
                     record["state"], record["active"] = state, active
-                    self.save(directory, record, name + ".intent")
+                    self.save(directory, record, event)
                 result = operation(previous["reserved_requests"])
                 previous["result"] = result
                 record["active"] = None
@@ -216,7 +236,7 @@ class Workflow:
                         lineage_path = (
                             bench.root / "workflows" / digest(key.encode()) / "lineage.json"
                         )
-                        with lock(lineage_path.with_suffix(".lock")):
+                        with lock(lineage_path.parent / "control.lock"):
                             lineage = json.loads(lineage_path.read_bytes())
                             expected = record["candidates"][:attempt] + [sha]
                             if lineage["candidates"] not in (expected, expected[:-1]):
@@ -281,9 +301,10 @@ class Workflow:
                             + bench.artifacts.get(checked["output_sha256"]).decode()[:3500]
                         )
                     if checked["passed"] and clear:
-                        guard()
-                        record["state"] = "ready_local"
-                        self.save(directory, record, "workflow.ready")
+                        with lock(directory / "dispatch.lock", timeout=15):
+                            guard()
+                            record["state"] = "ready_local"
+                            self.save(directory, record, "workflow.ready")
                         return self.inspect(key)
                     files = load_candidate(bench.artifacts, sha)["files"]
                 record["state"] = "needs_attention"

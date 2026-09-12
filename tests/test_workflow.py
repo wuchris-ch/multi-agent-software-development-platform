@@ -114,7 +114,14 @@ def test_workflow_recovers_after_coding_without_another_model_call(
     with pytest.raises(RuntimeError, match="simulated interruption"):
         workflow.run(*args)
     assert len(gateway.requests) == 2
-    monkeypatch.setattr(Workbench, "register", original)
+
+    def resumed(*call_args, **call_kwargs):
+        record = json.loads((workflow.directory("task") / "job.json").read_bytes())
+        assert record["state"] == "sealing"
+        assert record["key"] == "task"
+        return original(*call_args, **call_kwargs)
+
+    monkeypatch.setattr(Workbench, "register", resumed)
     assert workflow.run(*args)["state"] == "ready_local"
     assert len(gateway.requests) == 3
     assert gateway.starts == 1
@@ -146,6 +153,33 @@ def test_workflow_cancel_stops_active_agent_and_prevents_next_stage(repository, 
     assert result["state"] == "cancelled"
     assert gateway.starts == 1 and gateway.reviews == 0
     assert workflow.run(*args)["state"] == "cancelled"
+
+
+def test_cancellation_between_stage_intent_and_agent_admission_prevents_dispatch(
+    repository, tmp_path, monkeypatch
+):
+    from threading import Event
+
+    from swe_platform.broker.host import AgentRun
+
+    gateway = WorkflowGateway()
+    workflow, args = inputs(repository, tmp_path, gateway)
+    admitted, release = Event(), Event()
+    original = AgentRun.run
+
+    def delayed(self, *call_args, **kwargs):
+        admitted.set()
+        assert release.wait(timeout=10)
+        return original(self, *call_args, **kwargs)
+
+    monkeypatch.setattr(AgentRun, "run", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(workflow.run, *args)
+        assert admitted.wait(timeout=10)
+        workflow.cancel("task")
+        release.set()
+        assert future.result(timeout=10)["state"] == "cancelled"
+    assert not gateway.requests
 
 
 def test_environment_credentials_are_explicit_and_not_serialized(monkeypatch):

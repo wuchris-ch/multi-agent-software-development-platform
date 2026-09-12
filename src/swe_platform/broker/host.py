@@ -277,7 +277,8 @@ class AgentRun:
             raise ValueError("Unknown coding submission")
         # Cancellation can interrupt the run without acquiring its lifetime lock.
         atomic_write(directory / "cancel", b"cancel requested\n")
-        self.docker.cancel(execution)
+        if not self.docker.cancel(execution):
+            raise ValueError("Agent termination is unconfirmed")
         return {
             "execution_id": execution,
             "state": "stopped",

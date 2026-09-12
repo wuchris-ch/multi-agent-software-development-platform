@@ -1638,3 +1638,99 @@ progress::-moz-progress-bar {
     gap: 8px;
   }
 }
+
+.modal-shade {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  backdrop-filter: blur(3px);
+}
+.run-dialog {
+  width: min(600px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #dfe5ec;
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: 0 24px 70px #17263a35;
+}
+.run-dialog h2 {
+  margin: 0;
+  font-size: 21px;
+  letter-spacing: -0.5px;
+}
+.run-dialog > p {
+  color: #6c7889;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.publication-form select {
+  width: 100%;
+  border: 1px solid #dce3eb;
+  border-radius: 7px;
+  padding: 11px 12px;
+  background: #fff;
+  color: #243449;
+  font: inherit;
+}
+.plan-summary {
+  grid-column: 1 / -1;
+}
+.plan-summary p,
+.plan-summary li {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.plan-summary ol {
+  margin-bottom: 0;
+  padding-left: 20px;
+}
+.plan-summary small {
+  display: block;
+  color: #7a8695;
+  margin-bottom: 8px;
+}
+.workspace-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -6px 0 14px;
+}
+.policy-comparisons {
+  margin-bottom: 22px;
+  padding: 24px;
+  background: #fff;
+}
+.policy-comparisons h2 {
+  margin: 0;
+  font-size: 19px;
+}
+.policy-comparisons p {
+  color: #718096;
+  font-size: 13px;
+}
+.comparison-table {
+  overflow-x: auto;
+  margin: 18px 0;
+}
+.comparison-table table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.comparison-table th,
+.comparison-table td {
+  padding: 12px;
+  border-bottom: 1px solid #e4e9ef;
+}
+.comparison-table th {
+  font-weight: 600;
+  color: #617189;
+  background: #f8fafc;
+}

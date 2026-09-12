@@ -19,8 +19,12 @@ from .candidates import Workbench
 from .evidence import export_workflow
 from .github import GitHub, RemoteError
 from .github_publication import Publisher
+from .improvement import PolicyRegistry
 from .io import canonical, digest, lock
+from .launch import Launcher, LaunchRequest
 from .models import StrictModel
+from .producer import EvaluatorClient, EvaluatorProfile, Producer, cached_assessment
+from .telemetry import ModelLedger, execution_trace
 from .workflow import Workflow
 from .workspace.snapshot import load_candidate
 
@@ -154,7 +158,22 @@ class Catalog:
             "candidate": candidate,
             "candidates": record["candidates"],
             "publications": publications,
-            "can_cancel": bool(record.get("key")) and state not in ("ready_local", "cancelled"),
+            "mode": record["request"].get("policy", {}).get("mode", "review"),
+            "plan": record.get("plan"),
+            "accounting": ModelLedger(
+                directory,
+                max_requests=record["request"]["max_requests"],
+                max_tokens=record["request"]["max_total_tokens"],
+                deadline=record["deadline"],
+            ).summary()
+            if (directory / "model-ledger.json").exists()
+            else None,
+            "acceptance": cached_assessment(directory),
+            "evaluation_reserved": (directory / "producer/admission.json").exists(),
+            "can_resume": (self.root / "launches" / identifier / "request.json").exists()
+            and state == "needs_attention",
+            "can_cancel": bool(record.get("key"))
+            and state not in ("ready_local", "verified_local", "cancelled"),
         }
 
 
@@ -166,6 +185,8 @@ def create_app(
     origin="http://127.0.0.1:8765",
     github_factory=GitHub,
     static_root=None,
+    config=None,
+    launcher=None,
 ):
     if (
         len(token) < 32
@@ -180,11 +201,15 @@ def create_app(
     hosts = {"127.0.0.1" + port, "localhost" + port}
     origins = {"http://" + host for host in hosts}
     catalog = Catalog(root, github_factory)
+    launcher = launcher or Launcher(root, config)
 
     @asynccontextmanager
     async def lifespan(_app):
         with lock(root / "console.lock"):
-            yield
+            try:
+                yield
+            finally:
+                launcher.close()
 
     app = FastAPI(
         title="Development control plane",
@@ -271,6 +296,67 @@ def create_app(
     @app.get("/api/workflows")
     def workflows(limit: int = Query(100, ge=1, le=500)):
         return catalog.list(limit)
+
+    @app.get("/api/projects")
+    def projects():
+        return {"items": launcher.projects(), "active_policy": PolicyRegistry(root).active()}
+
+    @app.post("/api/launches")
+    def launch(data: LaunchRequest):
+        return launcher.submit(data)
+
+    @app.get("/api/launches/{identifier}")
+    def launch_status(identifier: str):
+        return launcher.inspect(identifier)
+
+    @app.post("/api/launches/{identifier}/resume")
+    def resume(identifier: str):
+        return launcher.resume(identifier)
+
+    @app.get("/api/workflows/{identifier}/trace")
+    def trace(identifier: str):
+        directory, _ = catalog.read(identifier)
+        return execution_trace(directory)
+
+    def evaluator_for(identifier):
+        _, record = catalog.read(identifier)
+        projects = [
+            project
+            for project in launcher.config.projects
+            if project.source.resolve() == Path(record["request"]["source"]).resolve()
+            and project.evaluator_profile is not None
+        ]
+        if len(projects) != 1:
+            raise ValueError("Configure one evaluator connection for this repository")
+        client = EvaluatorClient(
+            EvaluatorProfile.model_validate_json(projects[0].evaluator_profile.read_bytes())
+        )
+        return Producer(root, client), record["key"]
+
+    @app.post("/api/workflows/{identifier}/acceptance/submit")
+    def submit_acceptance(identifier: str):
+        producer, key = evaluator_for(identifier)
+        return producer.submit(key)
+
+    @app.post("/api/workflows/{identifier}/acceptance/upload")
+    def upload_acceptance(identifier: str):
+        producer, key = evaluator_for(identifier)
+        return producer.upload(key)
+
+    @app.post("/api/workflows/{identifier}/acceptance/refresh")
+    def refresh_acceptance(identifier: str):
+        producer, key = evaluator_for(identifier)
+        return producer.assessment(key)
+
+    @app.get("/api/policies")
+    def policies():
+        registry = PolicyRegistry(root)
+        comparisons = [
+            json.loads(path.read_bytes())
+            for path in sorted((registry.root / "gates").glob("*/*.json"))
+            if path.name in ("development.json", "held_out.json")
+        ]
+        return {"active": registry.active(), "comparisons": comparisons}
 
     @app.get("/api/workflows/{identifier}")
     def workflow(identifier: str):

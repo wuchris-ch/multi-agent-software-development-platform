@@ -78,6 +78,27 @@ beforeEach(() => {
       requests.push({ path, init });
       let result: unknown;
       if (path.endsWith("/session")) result = { role };
+      else if (path === "/api/projects")
+        result = {
+          items: [
+            {
+              id: "sample",
+              title: "Sample repository",
+              allowed_paths: ["retry.py"],
+              max_requests: 20,
+              max_total_tokens: 200000,
+              timeout: 600,
+              requires_ticket: false,
+            },
+          ],
+        };
+      else if (path === "/api/launches") result = { id };
+      else if (path === `/api/launches/${id}`)
+        result = { workflow_id: id, state: "implementing" };
+      else if (path.endsWith("/acceptance/upload"))
+        result = { state: "artifacts_registered" };
+      else if (path.endsWith("/acceptance/submit"))
+        result = { state: "awaiting_independent_evaluation" };
       else if (path === "/api/workflows")
         result = { items: [run], unavailable: 0 };
       else if (path === `/api/workflows/${id}`) result = run;
@@ -110,6 +131,49 @@ afterEach(() => {
 });
 
 describe("development control panel", () => {
+  it("launches a scoped repository task through the configured project", async () => {
+    render(<App />);
+    const user = userEvent.setup();
+    await screen.findByText("This change is ready for delivery");
+    await user.click(screen.getByRole("button", { name: "New run" }));
+    await screen.findByText("Sample repository");
+    await user.type(
+      screen.getByLabelText("Requested change"),
+      "Fix duplicate retry handling",
+    );
+    await user.selectOptions(
+      screen.getByLabelText("Coordination"),
+      "selective",
+    );
+    await user.click(screen.getByRole("button", { name: "Start run" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const sent = JSON.parse(
+      requests.find((r) => r.path === "/api/launches")!.init.body as string,
+    );
+    expect(sent).toMatchObject({
+      project_id: "sample",
+      task: "Fix duplicate retry handling",
+      mode: "selective",
+    });
+    expect(sent.source).toBeUndefined();
+    expect(sent.max_requests).toBeUndefined();
+  });
+  it("keeps intake separate from independent acceptance", async () => {
+    run.evaluation_reserved = true;
+    render(<App />);
+    const user = userEvent.setup();
+    await screen.findByText("This change is ready for delivery");
+    await user.click(screen.getByRole("tab", { name: "Acceptance" }));
+    await user.click(screen.getByRole("button", { name: "Upload evidence" }));
+    await screen.findByText("artifacts registered");
+    await user.click(screen.getByRole("button", { name: "Submit candidate" }));
+    await screen.findByText("awaiting independent evaluation");
+    expect(screen.queryByText("Accepted")).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Publication" }));
+    expect(
+      screen.queryByRole("button", { name: "Prepare publication plan" }),
+    ).toBeNull();
+  });
   it("allows replacing an expired plan without approving it", async () => {
     run.publications = [
       { ...publication, plan: { ...publication.plan, expires_at: 1 } },

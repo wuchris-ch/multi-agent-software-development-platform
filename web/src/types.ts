@@ -68,6 +68,27 @@ export type Publication = {
   };
 };
 export type Run = RunSummary & {
+  mode?: string;
+  can_resume?: boolean;
+  evaluation_reserved?: boolean;
+  acceptance?: {
+    outcome: string;
+    candidate_manifest_sha256: string;
+    checks: { id: string; passed: boolean; reason: string }[];
+    reasons: string[];
+  } | null;
+  plan?: {
+    summary: string;
+    steps: { id: string; goal: string; paths: string[] }[];
+    specialists: { id: string; focus: string; paths: string[] }[];
+  } | null;
+  accounting?: {
+    max_tokens: number;
+    total_tokens: number | null;
+    reported_tokens: number;
+    tokens_used_or_reserved: number;
+    unresolved_calls: number;
+  } | null;
   task: string;
   base_revision: string;
   deadline: number;

@@ -28,9 +28,14 @@ import {
 } from "lucide-react";
 import { api, connect, downloadBundle, externalUrl } from "./api";
 import type { Publication, Run, RunSummary } from "./types";
+import { NewRun } from "./NewRun";
+import { Acceptance } from "./Acceptance";
+import { Policies } from "./Policies";
 
 const activeStates = new Set([
   "queued",
+  "planning",
+  "analyzing",
   "implementing",
   "repairing",
   "sealing",
@@ -38,6 +43,9 @@ const activeStates = new Set([
   "reviewing",
 ]);
 const labels: Record<string, string> = {
+  verified_local: "Public checks passed",
+  planning: "Planning",
+  analyzing: "Specialist analysis",
   ready_local: "Ready to deliver",
   needs_attention: "Needs attention",
   implementing: "Coding",
@@ -110,6 +118,7 @@ export function App() {
   const [tab, setTab] = useState("overview");
   const [refresh, setRefresh] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [showPolicies, setShowPolicies] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     const authorize = () => {
@@ -200,6 +209,11 @@ export function App() {
     };
   }, [selected, refresh]);
   const reload = useCallback(() => setRefresh((n) => n + 1), []);
+  const started = useCallback((id: string) => {
+    setSelected(id);
+    setTab("overview");
+    setRefresh((n) => n + 1);
+  }, []);
   const pick = (id: string) => {
     setSelected(id);
     setTab("overview");
@@ -328,12 +342,16 @@ export function App() {
                 </h1>
                 <p>Follow the work. Inspect the evidence. Ship the change.</p>
               </div>
-              <div className="runtime-tag">
-                <Box size={16} />
-                <span>
-                  Flue runtime<small>Isolated agent execution</small>
-                </span>
-              </div>
+              {role === "operator" ? (
+                <NewRun onStarted={started} />
+              ) : (
+                <div className="runtime-tag">
+                  <Box size={16} />
+                  <span>
+                    Flue runtime<small>Isolated agent execution</small>
+                  </span>
+                </div>
+              )}
             </div>
             <div className="metrics">
               <Metric
@@ -364,6 +382,17 @@ export function App() {
                 detail="Used or reserved across runs"
               />
             </div>
+            <div className="workspace-actions">
+              <button
+                className="text-button"
+                onClick={() => setShowPolicies((value) => !value)}
+              >
+                {showPolicies
+                  ? "Show development runs"
+                  : "Compare production policies"}
+              </button>
+            </div>
+            {showPolicies && <Policies />}
             {error && (
               <div className="error-banner" role="alert">
                 <CircleAlert size={16} />
@@ -476,6 +505,7 @@ export function App() {
                         ["diff", "Changes"],
                         ["checks", "Checks & review"],
                         ["activity", "Activity"],
+                        ["acceptance", "Acceptance"],
                         ["publication", "Publication"],
                       ].map(([id, text]) => (
                         <button
@@ -499,6 +529,14 @@ export function App() {
                       {tab === "diff" && <DiffView run={run} />}
                       {tab === "checks" && <Checks run={run} />}
                       {tab === "activity" && <ActivityView run={run} />}
+                      {tab === "acceptance" && (
+                        <Acceptance
+                          key={run.id}
+                          run={run}
+                          role={role}
+                          reload={reload}
+                        />
+                      )}
                       {tab === "publication" && (
                         <PublicationView
                           key={run.id}
@@ -509,6 +547,21 @@ export function App() {
                       )}
                     </div>
                     <div className="detail-footer">
+                      {role === "operator" && run.can_resume && (
+                        <button
+                          className="text-button"
+                          onClick={async () => {
+                            try {
+                              await api(`/launches/${run.id}/resume`, {});
+                              reload();
+                            } catch (e) {
+                              setError((e as Error).message);
+                            }
+                          }}
+                        >
+                          Resume saved run
+                        </button>
+                      )}
                       {run.candidate && (
                         <button
                           className="text-button"
@@ -695,6 +748,26 @@ function Overview({
         </button>
       </div>
       <div className="overview-grid">
+        {run.plan && (
+          <div className="info-panel plan-summary">
+            <h3>Implementation plan</h3>
+            <p>{run.plan.summary}</p>
+            <ol>
+              {run.plan.steps.map((step) => (
+                <li key={step.id}>
+                  {step.goal}
+                  <small>{step.paths.join(", ")}</small>
+                </li>
+              ))}
+            </ol>
+            {run.plan.specialists.length > 0 && (
+              <p>
+                {run.plan.specialists.length} read-only specialist handoffs
+                support the coding agent.
+              </p>
+            )}
+          </div>
+        )}
         <div className="info-panel">
           <h3>
             <FileCode2 size={15} /> Candidate
@@ -720,6 +793,29 @@ function Overview({
           <h3>
             <Activity size={15} /> Run budget
           </h3>
+          {run.accounting && (
+            <>
+              <div className="key-value">
+                <span>Reported tokens</span>
+                <strong>
+                  {run.accounting.reported_tokens.toLocaleString()}
+                </strong>
+              </div>
+              <div className="key-value">
+                <span>Used or reserved</span>
+                <strong>
+                  {run.accounting.tokens_used_or_reserved.toLocaleString()} /{" "}
+                  {run.accounting.max_tokens.toLocaleString()}
+                </strong>
+              </div>
+              {run.accounting.unresolved_calls > 0 && (
+                <p>
+                  {run.accounting.unresolved_calls} request reservations await
+                  usage receipts.
+                </p>
+              )}
+            </>
+          )}
           <div className="key-value">
             <span>Model requests</span>
             <strong>
@@ -1023,7 +1119,9 @@ function PublicationView({
       setBusy("");
     }
   };
-  const ready = run.candidate?.state === "ready_local";
+  const ready =
+    run.candidate?.state === "ready_local" &&
+    (!run.evaluation_reserved || run.acceptance?.outcome === "pass");
   return (
     <>
       <div className="publication-heading">

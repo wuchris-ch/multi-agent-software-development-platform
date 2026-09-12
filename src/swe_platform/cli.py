@@ -16,7 +16,9 @@ from .coding import CandidateCoding
 from .credentials import GatewayProfile
 from .evidence import verify_bundle, write_bundle
 from .github_publication import Publisher
+from .improvement import PolicyRegistry, PromotionGate
 from .io import atomic_write, canonical, lock
+from .launch import ConsoleConfig
 from .models import Submission
 from .policy import DevelopmentPolicy
 from .producer import EvaluatorClient, EvaluatorProfile, Producer, ProducerRequest
@@ -51,6 +53,10 @@ producer_app = typer.Typer(
     no_args_is_help=True, help="Run reserved evaluation trials and submit exact candidates"
 )
 app.add_typer(producer_app, name="producer")
+improvement_app = typer.Typer(
+    no_args_is_help=True, help="Propose, evaluate and roll out versioned production policies"
+)
+app.add_typer(improvement_app, name="improvement")
 DEFAULT_STATE = Path.home() / "Library/Application Support/SWEPlatform"
 
 
@@ -313,6 +319,52 @@ def evaluator(path):
     return EvaluatorClient(EvaluatorProfile.model_validate_json(path.read_bytes()))
 
 
+@improvement_app.command("initialize")
+def initialize_policy(ctx: typer.Context, mode: str = "review"):
+    emit(PolicyRegistry(ctx.obj).initialize(DevelopmentPolicy.preset(mode)))
+
+
+@improvement_app.command("register")
+def register_policy(ctx: typer.Context, policy: Path):
+    emit(
+        {
+            "policy_sha256": PolicyRegistry(ctx.obj).register(
+                DevelopmentPolicy.model_validate_json(policy.read_bytes())
+            )
+        }
+    )
+
+
+@improvement_app.command("propose")
+def propose_policy(ctx: typer.Context, parent: str):
+    emit(PolicyRegistry(ctx.obj).propose(parent))
+
+
+@improvement_app.command("freeze")
+def freeze_gate(ctx: typer.Context, gate: Path):
+    emit(PolicyRegistry(ctx.obj).freeze(PromotionGate.model_validate_json(gate.read_bytes())))
+
+
+@improvement_app.command("evaluate")
+def evaluate_policy(ctx: typer.Context, gate: str, split: str):
+    emit(PolicyRegistry(ctx.obj).evaluate(gate, split))
+
+
+@improvement_app.command("promote")
+def promote_policy(ctx: typer.Context, gate: str, expected: str, generation: int):
+    emit(PolicyRegistry(ctx.obj).promote(gate, expected, generation))
+
+
+@improvement_app.command("rollback")
+def rollback_policy(ctx: typer.Context, target: str, expected: str, generation: int):
+    emit(PolicyRegistry(ctx.obj).rollback(target, expected, generation))
+
+
+@improvement_app.command("active")
+def active_policy(ctx: typer.Context):
+    emit(PolicyRegistry(ctx.obj).active())
+
+
 @producer_app.command("recipe")
 def producer_recipe(request_file: Path):
     emit(ProducerRequest.model_validate_json(request_file.read_bytes()).recipe_descriptor())
@@ -334,6 +386,12 @@ def producer_binding(ctx: typer.Context, key: str):
 @producer_app.command("submit")
 def producer_submit(ctx: typer.Context, key: str, profile: Path):
     emit(Producer(ctx.obj, evaluator(profile)).submit(key))
+
+
+@producer_app.command("upload")
+def producer_upload(ctx: typer.Context, key: str, profile: Path):
+    """Upload exact evidence before the evaluator issues its candidate-bound contract."""
+    emit(Producer(ctx.obj, evaluator(profile)).upload(key))
 
 
 @producer_app.command("assessment")
@@ -394,7 +452,11 @@ def reconcile_publication(ctx: typer.Context, plan: str, workflow: str | None = 
 
 
 @app.command("ui")
-def control_panel(ctx: typer.Context, port: int = typer.Option(8765, min=1024, max=65535)):
+def control_panel(
+    ctx: typer.Context,
+    port: int = typer.Option(8765, min=1024, max=65535),
+    config: Path | None = None,
+):
     """Open the local control panel for runs, diffs, review, and draft PR publication."""
     import uvicorn
 
@@ -405,7 +467,13 @@ def control_panel(ctx: typer.Context, port: int = typer.Option(8765, min=1024, m
     typer.echo(f"Operator session: {origin}/#token={token}")
     typer.echo(f"Viewer session: {origin}/#token={viewer}")
     uvicorn.run(
-        create_app(ctx.obj, token, viewer_token=viewer, origin=origin),
+        create_app(
+            ctx.obj,
+            token,
+            viewer_token=viewer,
+            origin=origin,
+            config=ConsoleConfig.model_validate_json(config.read_bytes()) if config else None,
+        ),
         host="127.0.0.1",
         port=port,
         access_log=False,

@@ -8,7 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from swe_platform.broker.host import AttachedOutput, BrokerPolicy, CodingRun, mask_model_metadata
+from swe_platform.broker.host import (
+    AgentRun,
+    AttachedOutput,
+    BrokerPolicy,
+    mask_model_metadata,
+    validate_reply_tools,
+)
 from swe_platform.io import canonical
 
 
@@ -16,7 +22,7 @@ def frame(body, **changes):
     return {
         "type": "model_request",
         "id": "test-request",
-        "path": "/v1/responses",
+        "path": "/v1/chat/completions",
         "body": base64.b64encode(canonical(body)).decode(),
         **changes,
     }
@@ -26,10 +32,8 @@ def test_broker_enforces_route_model_and_quota():
     policy = BrokerPolicy("configured-model", deadline=time.time() + 5, max_requests=1)
     with pytest.raises(ValueError, match="Unsupported"):
         policy.authorize(frame({}, path="https://example.invalid/steal"))
-    body = policy.authorize(
-        frame({"model": "arbitrary", "store": True, "max_output_tokens": 99999})
-    )
-    assert body == {"model": "configured-model", "store": False, "max_output_tokens": 4096}
+    body = policy.authorize(frame({"model": "arbitrary", "max_tokens": 99999}))
+    assert body == {"model": "configured-model", "max_tokens": 4096}
     with pytest.raises(ValueError, match="exhausted"):
         policy.authorize(frame({}))
 
@@ -41,7 +45,7 @@ def test_broker_enforces_route_model_and_quota():
         {"tools": [{"type": "web_search"}]},
         {"input": [{"type": "input_image", "image_url": "https://example.invalid"}]},
         {"input": [{"nested": {"file_id": "private-file"}}]},
-        {"max_output_tokens": True},
+        {"max_tokens": True},
         {"unknown": "field"},
     ],
 )
@@ -57,57 +61,99 @@ def test_response_metadata_uses_worker_alias():
     assert b'"model":"worker"' in masked
 
 
+def test_reply_cannot_invoke_undeclared_tools_or_give_reviewer_shell_access():
+    def response(name):
+        return canonical(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {"id": "call", "type": "function", "function": {"name": name}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+    validate_reply_tools(response("bash"), "application/json", "coder")
+    for name, role in [("task", "coder"), ("bash", "reviewer"), ("read", "reviewer")]:
+        with pytest.raises(ValueError, match="outside the agent role"):
+            validate_reply_tools(response(name), "application/json", role)
+
+
+def test_streamed_tool_names_are_validated_after_assembly():
+    raw = b"".join(
+        b"data: "
+        + canonical(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": [{"index": 0, "function": {"name": part}}]},
+                    }
+                ]
+            }
+        )
+        + b"\n\n"
+        for part in ["ba", "sh"]
+    )
+    validate_reply_tools(raw, "text/event-stream", "coder")
+
+
 class FakeGateway:
     profile = SimpleNamespace(model="fixture-model")
     identity_sha256 = "f" * 64
 
-    def __init__(self, command=None):
+    def __init__(self, command=None, message="Done."):
         self.requests = []
         self.command = command
+        self.message = message
 
     def request(self, body, deadline):
         self.requests.append(body)
-        item = {
-            "id": "msg_fixture",
-            "type": "message",
-            "status": "completed",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": "Done.", "annotations": []}],
-        }
-        if self.command and len(self.requests) == 1:
-            item = {
-                "id": "fc_fixture",
-                "type": "function_call",
-                "status": "completed",
-                "call_id": "call_fixture",
-                "name": "exec_command",
-                "arguments": json.dumps(
-                    {"cmd": self.command, "yield_time_ms": 1000, "max_output_tokens": 1000}
-                ),
+        tool = self.command and len(self.requests) == 1
+        delta = {"role": "assistant", "content": self.message}
+        if tool:
+            delta = {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_fixture",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({"command": self.command, "timeout": 10}),
+                        },
+                    }
+                ],
             }
-        response = {
-            "id": "resp_fixture",
-            "object": "response",
-            "status": "completed",
+        chunk = {
+            "id": "completion_fixture",
+            "object": "chat.completion.chunk",
+            "created": 1,
             "model": "worker",
-            "output": [item],
-            "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         }
-        events = [
-            {
-                "type": "response.created",
-                "response": {**response, "status": "in_progress", "output": []},
-            },
-            {"type": "response.output_item.done", "output_index": 0, "item": item},
-            {"type": "response.completed", "response": response},
-        ]
-        data = b"".join(b"data: " + canonical(event) + b"\n\n" for event in events)
+        final = {
+            **chunk,
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": "tool_calls" if tool else "stop"}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        }
+        data = (
+            b"".join(b"data: " + canonical(event) + b"\n\n" for event in [chunk, final])
+            + b"data: [DONE]\n\n"
+        )
         return 200, "text/event-stream", data
 
 
-def test_real_cli_uses_broker_and_retains_receipt(tmp_path):
+def test_real_flue_uses_broker_and_retains_receipt(tmp_path):
     gateway = FakeGateway()
-    run = CodingRun(tmp_path)
+    run = AgentRun(tmp_path)
     files = {"answer.txt": {"data": base64.b64encode(b"unchanged\n").decode(), "mode": 0o644}}
     args = (
         "fixture",
@@ -141,7 +187,6 @@ from pathlib import Path
 assert 'MODEL_GATEWAY_API_KEY' not in os.environ
 assert not Path({str(canary)!r}).exists()
 assert not Path('/var/run/docker.sock').exists()
-assert not Path('/tmp/codex/auth.json').exists()
 assert os.getuid() == 65534
 try:
     socket.create_connection(('8.8.8.8', 53), timeout=0.5)
@@ -153,20 +198,27 @@ Path('answer.txt').write_text('isolated\\n')
 print('ISOLATION_OK')
 """
     gateway = FakeGateway("python -c " + shlex.quote(script))
-    run = CodingRun(tmp_path / "run")
+    run = AgentRun(tmp_path / "run")
     result = run.run(
         "isolation", {}, "Perform the requested tool call.", ["answer.txt"], gateway, timeout=45
     )
     assert result["model_requests"] == 2
     assert base64.b64decode(result["files"]["answer.txt"]["data"]) == b"isolated\n"
-    assert "ISOLATION_OK" in json.dumps(gateway.requests[-1]["input"])
+    assert "ISOLATION_OK" in json.dumps(gateway.requests[-1]["messages"])
     assert "private-canary" not in json.dumps(gateway.requests)
-    assert all(t["type"] in ("function", "custom") for t in gateway.requests[0]["tools"])
+    assert {t["function"]["name"] for t in gateway.requests[0]["tools"]} == {
+        "bash",
+        "read",
+        "write",
+        "edit",
+        "grep",
+        "glob",
+    }
 
 
 def test_exhausted_broker_stops_worker_and_never_replays_intent(tmp_path):
     gateway = FakeGateway("true")
-    run = CodingRun(tmp_path)
+    run = AgentRun(tmp_path)
     args = ("exhausted", {}, "Perform the requested tool call.", [], gateway)
     with pytest.raises(ValueError, match="exhausted"):
         run.run(*args, timeout=45, max_requests=1)
@@ -179,7 +231,7 @@ def test_exhausted_broker_stops_worker_and_never_replays_intent(tmp_path):
     run.docker.remove(execution)
 
 
-def test_failed_cli_retains_redacted_diagnostic_without_success_receipt(tmp_path):
+def test_failed_flue_retains_redacted_diagnostic_without_success_receipt(tmp_path):
     class RejectedGateway(FakeGateway):
         def request(self, body, deadline):
             self.requests.append(body)
@@ -190,13 +242,13 @@ def test_failed_cli_retains_redacted_diagnostic_without_success_receipt(tmp_path
             )
 
     gateway = RejectedGateway()
-    run = CodingRun(tmp_path)
-    with pytest.raises(ValueError, match="Incomplete Codex"):
+    run = AgentRun(tmp_path)
+    with pytest.raises(ValueError, match="Incomplete Flue"):
         run.run("rejected", {}, "Say done.", [], gateway, timeout=30)
     diagnostic = json.loads(next(tmp_path.rglob("failure.json")).read_bytes())
     assert diagnostic["worker_exit"] != 0
     assert diagnostic["model_requests"] == 1
-    assert "rejected request" in diagnostic["events"]
+    assert "Flue agent execution failed" in diagnostic["diagnostic"]
     assert "fixture-model" not in json.dumps(diagnostic)
     assert not list(tmp_path.rglob("result.json"))
     execution = json.loads(next(tmp_path.rglob("intent.json")).read_bytes())["execution_id"]

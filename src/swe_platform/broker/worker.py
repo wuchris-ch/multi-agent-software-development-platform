@@ -51,7 +51,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
-        if self.path != "/v1/responses" or not 0 < length <= 1024 * 1024:
+        if self.path != "/v1/chat/completions" or not 0 < length <= 1024 * 1024:
             self.send_error(403)
             return
         body = self.rfile.read(length)
@@ -100,54 +100,14 @@ def main():
     server.daemon_threads = True
     threading.Thread(target=replies, daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    home = Path("/tmp/codex")
-    home.mkdir(mode=0o700)
     env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": "/tmp",
-        "CODEX_HOME": str(home),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
+        "OTEL_TRACES_EXPORTER": "none",
     }
-    command = [
-        "codex",
-        "exec",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--ephemeral",
-        "--json",
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--disable",
-        "multi_agent",
-        "--disable",
-        "plugins",
-        "--disable",
-        "hooks",
-        "--disable",
-        "apps",
-        "--disable",
-        "browser_use",
-        "--disable",
-        "computer_use",
-        "--disable",
-        "image_generation",
-        "-c",
-        'web_search="disabled"',
-        "-c",
-        'model_provider="job_broker"',
-        "-c",
-        'model_providers.job_broker.name="Job broker"',
-        "-c",
-        f'model_providers.job_broker.base_url="http://127.0.0.1:{server.server_port}/v1"',
-        "-c",
-        'model_providers.job_broker.wire_api="responses"',
-        "-c",
-        "model_providers.job_broker.requires_openai_auth=false",
-        "-m",
-        "worker",
-        "-",
-    ]
+    command = ["node", "/opt/agents/agents/run.mjs"]
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -156,7 +116,21 @@ def main():
         env=env,
         start_new_session=True,
     )
-    process.stdin.write(spec["task"].encode())
+    process.stdin.write(
+        json.dumps(
+            {
+                "task": spec["task"]
+                + (
+                    "\nAllowed output paths: " + json.dumps(spec["allowed"])
+                    if spec["role"] == "coder"
+                    else ""
+                ),
+                "role": spec["role"],
+                "deadline": spec["deadline"],
+                "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+            }
+        ).encode()
+    )
     process.stdin.close()
     selector = selectors.DefaultSelector()
     buffers = {process.stdout: bytearray(), process.stderr: bytearray()}

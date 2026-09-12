@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from swe_platform.adapters import codex
+from swe_platform.adapters import flue
 from swe_platform.io import digest
 from swe_platform.process import bounded_run
 from swe_platform.review.flue import validate
@@ -102,20 +102,24 @@ def test_repair_limits_and_identical_candidate():
     assert RepairPolicy().decide("ok", True, False, "none")[0] == "ready_local"
 
 
-def test_codex_stream_and_explicit_broker_path():
-    events = [
-        {"type": "thread.started", "thread_id": "session"},
-        {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
-        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 4}},
-    ]
-    raw = b"".join(json.dumps(e).encode() + b"\n" for e in events)
-    assert codex.collect(raw, 0)["cost_usd"] is None
-    with pytest.raises(ValueError):
-        codex.collect(raw[:-1], 0)
-    with pytest.raises(ValueError):
-        codex.collect(raw, 1)
-    assert codex.capabilities()["enabled"]
-    assert "--ignore-user-config" in codex.invocation("explicit-model")
+def test_flue_completion_and_role_binding():
+    result = {
+        "schema_version": "flue-result/v1",
+        "role": "coder",
+        "submission_id": "submission",
+        "message": "done",
+        "usage": {"input": 10, "output": 4, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 14},
+        "status": "completed",
+    }
+    raw = json.dumps(result).encode() + b"\n"
+    assert flue.collect(raw, 0)["cost_usd"] is None
+    assert flue.collect(raw, 0)["usage"]["input_tokens"] == 10
+    for invalid, code in [(raw[:-1], 0), (raw, 1), (raw + raw, 0)]:
+        with pytest.raises(ValueError):
+            flue.collect(invalid, code)
+    with pytest.raises(ValueError, match="completion"):
+        flue.collect(raw, 0, role="reviewer")
+    assert flue.capabilities()["roles"] == ["coder", "reviewer"]
 
 
 def test_bounded_adapter_process():

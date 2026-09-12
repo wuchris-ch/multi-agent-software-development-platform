@@ -8,8 +8,8 @@ from pathlib import Path
 import typer
 
 from . import __version__
-from .adapters.codex import capabilities
-from .broker.host import CodingRun, HostGateway
+from .adapters.flue import capabilities
+from .broker.host import AgentRun, HostGateway
 from .candidates import Recipe, Workbench
 from .coding import CandidateCoding
 from .credentials import GatewayProfile
@@ -18,6 +18,7 @@ from .models import Submission
 from .service import request
 from .service import serve as run_service
 from .store import Store
+from .workflow import Workflow
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -28,6 +29,10 @@ candidate_app = typer.Typer(
     no_args_is_help=True, help="Import and inspect local repository patches"
 )
 app.add_typer(candidate_app, name="candidate")
+workflow_app = typer.Typer(
+    no_args_is_help=True, help="Orchestrate Flue coding, checks, review, and repairs"
+)
+app.add_typer(workflow_app, name="workflow")
 DEFAULT_STATE = Path.home() / "Library/Application Support/SWEPlatform"
 
 
@@ -61,7 +66,6 @@ def doctor():
     for tool, args in {
         "git": ["--version"],
         "docker": ["version", "--format", "{{.Server.Version}}"],
-        "codex": ["--version"],
         "node": ["--version"],
     }.items():
         binary = shutil.which(tool)
@@ -76,7 +80,7 @@ def doctor():
             )
         except subprocess.TimeoutExpired:
             checks[tool] = "unavailable"
-    checks["coding_adapter"] = capabilities()
+    checks["agent_runtime"] = capabilities()
     checks["scripted_fixture"] = "available; fixed trusted code only"
     emit(checks)
 
@@ -174,7 +178,7 @@ def code_candidate(
 @candidate_app.command("stop-coding")
 def stop_coding(ctx: typer.Context, key: str):
     """Stop a live or interrupted coding attempt and confirm its container is stopped."""
-    emit(CodingRun(ctx.obj / "coding").cancel(key))
+    emit(AgentRun(ctx.obj / "coding").cancel(key))
 
 
 @candidate_app.command("verify")
@@ -184,13 +188,10 @@ def verify_candidate(ctx: typer.Context, sha: str):
 
 
 @candidate_app.command("review")
-def review_candidate(ctx: typer.Context, sha: str, flue_cli: Path, gateway_profile: Path):
-    """Obtain a fresh Flue verdict using a private Keychain-backed gateway profile."""
+def review_candidate(ctx: typer.Context, sha: str, gateway_profile: Path, image: str | None = None):
+    """Run the built-in Flue reviewer against the exact candidate diff."""
     profile = GatewayProfile.model_validate_json(gateway_profile.read_bytes())
-    node = shutil.which("node")
-    if node is None:
-        raise typer.BadParameter("Node is unavailable")
-    emit(Workbench(ctx.obj).review(sha, flue_cli, profile, node))
+    emit(Workbench(ctx.obj).review_agent(sha, HostGateway(profile), image=image))
 
 
 @candidate_app.command("repair")
@@ -203,3 +204,53 @@ def repair_candidate(ctx: typer.Context, sha: str, patch: Path):
 def inspect_candidate(ctx: typer.Context, sha: str):
     """Validate evidence against the exact candidate and display the local patch path."""
     emit(Workbench(ctx.obj).inspect(sha))
+
+
+@workflow_app.command("run")
+def run_workflow(
+    ctx: typer.Context,
+    source: Path,
+    recipe: Path,
+    gateway_profile: Path,
+    task: str = typer.Option(...),
+    allow: list[str] = typer.Option(...),
+    key: str = typer.Option(...),
+    image: str | None = None,
+    review_profile: Path | None = None,
+    timeout: float = 600,
+    max_requests: int = 30,
+    max_repairs: int = 2,
+):
+    """Run or resume an entire development task with Flue agents."""
+    gateway = HostGateway(GatewayProfile.model_validate_json(gateway_profile.read_bytes()))
+    reviewer = (
+        HostGateway(GatewayProfile.model_validate_json(review_profile.read_bytes()))
+        if review_profile
+        else gateway
+    )
+    emit(
+        Workflow(ctx.obj, image=image).run(
+            key,
+            source.resolve(),
+            task,
+            allow,
+            Recipe.model_validate_json(recipe.read_bytes()),
+            gateway,
+            review_gateway=reviewer,
+            timeout=timeout,
+            max_requests=max_requests,
+            max_repairs=max_repairs,
+        )
+    )
+
+
+@workflow_app.command("inspect")
+def inspect_workflow(ctx: typer.Context, key: str):
+    """Show current candidate, exact evidence, stage history, and shared budget."""
+    emit(Workflow(ctx.obj).inspect(key))
+
+
+@workflow_app.command("cancel")
+def cancel_workflow(ctx: typer.Context, key: str):
+    """Stop the active stage and persist a cancellation request."""
+    emit(Workflow(ctx.obj).cancel(key))

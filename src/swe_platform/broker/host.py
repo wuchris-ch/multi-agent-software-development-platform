@@ -9,13 +9,13 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ..adapters.codex import collect
+from ..adapters.flue import collect
 from ..credentials import GatewayProfile
 from ..io import atomic_write, canonical, digest, lock
 from ..process import bounded_run
-from ..sandbox.docker import Docker, safe_path
+from ..sandbox.docker import PYTHON_IMAGE, Docker, safe_path
 
-CODEX_IMAGE = "sha256:9a72f4e1ed563ee949496b0b345c8c47559beef87130c93ab3ae9a49789f1d18"
+AGENT_VERSION = "flue/2.0.3"
 
 
 class AttachedOutput:
@@ -98,7 +98,10 @@ class AttachedOutput:
 class BrokerPolicy:
     """Every frame is untrusted, including frames spoofed by arbitrary worker code."""
 
-    def __init__(self, model, *, deadline, max_requests=12, max_output_tokens=4096):
+    def __init__(self, model, *, deadline, max_requests=12, max_output_tokens=4096, role="coder"):
+        if role not in ("coder", "reviewer"):
+            raise ValueError("Unknown agent role")
+        self.role = role
         self.model = model
         self.deadline = deadline
         self.max_requests = max_requests
@@ -113,7 +116,7 @@ class BrokerPolicy:
             not isinstance(frame, dict)
             or set(frame) != {"type", "id", "path", "body"}
             or frame["type"] != "model_request"
-            or frame["path"] != "/v1/responses"
+            or frame["path"] != "/v1/chat/completions"
         ):
             raise ValueError("Unsupported model operation")
         if not isinstance(frame["id"], str) or not 1 <= len(frame["id"]) <= 100:
@@ -128,32 +131,32 @@ class BrokerPolicy:
         body = json.loads(data)
         allowed = {
             "model",
-            "input",
-            "instructions",
+            "messages",
             "tools",
             "tool_choice",
-            "parallel_tool_calls",
-            "reasoning",
-            "text",
             "stream",
-            "store",
-            "include",
-            "max_output_tokens",
-            "prompt_cache_key",
-            "previous_response_id",
-            "metadata",
-            "client_metadata",
-            "service_tier",
+            "stream_options",
+            "max_tokens",
+            "temperature",
+            "parallel_tool_calls",
         }
         if not isinstance(body, dict) or set(body) - allowed:
             raise ValueError("Unsupported model request fields")
-        if body.get("previous_response_id"):
-            raise ValueError("Cross-request response handles are disabled")
+        if not isinstance(body.get("messages", []), list):
+            raise ValueError("Invalid model messages")
         if not isinstance(body.get("tools", []), list):
             raise ValueError("Invalid tool definitions")
+        permitted = (
+            {"read", "write", "edit", "bash", "grep", "glob"} if self.role == "coder" else set()
+        )
         for tool in body.get("tools", []):
-            if not isinstance(tool, dict) or tool.get("type") not in ("function", "custom"):
-                raise ValueError("Hosted tools are disabled")
+            if (
+                not isinstance(tool, dict)
+                or tool.get("type") != "function"
+                or not isinstance(tool.get("function"), dict)
+                or tool["function"].get("name") not in permitted
+            ):
+                raise ValueError("Tool is not permitted for this agent role")
 
         def check(value):
             if isinstance(value, dict):
@@ -166,16 +169,11 @@ class BrokerPolicy:
                     check(nested)
 
         check(body)
-        requested = body.get("max_output_tokens", self.max_output_tokens)
+        requested = body.get("max_tokens", self.max_output_tokens)
         if type(requested) is not int or requested <= 0:
             raise ValueError("Invalid output token allowance")
-        body["max_output_tokens"] = min(requested, self.max_output_tokens)
+        body["max_tokens"] = min(requested, self.max_output_tokens)
         body["model"] = self.model
-        body["store"] = False
-        body.pop("metadata", None)
-        body.pop("client_metadata", None)
-        body.pop("prompt_cache_key", None)
-        body.pop("service_tier", None)
         self.requests += 1
         self.request_ids.add(frame["id"])
         return body
@@ -200,6 +198,32 @@ def mask_model_metadata(raw, content_type):
     return canonical(replace(json.loads(raw)))
 
 
+def validate_reply_tools(raw, content_type, role):
+    """Reject unsolicited tools even if a runtime has additional built-ins registered."""
+    permitted = {"read", "write", "edit", "bash", "grep", "glob"} if role == "coder" else set()
+    names = {}
+    if "text/event-stream" in content_type:
+        values = [
+            json.loads(line[6:])
+            for line in raw.decode().splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+    else:
+        values = [json.loads(raw)]
+    for value in values:
+        for choice in value.get("choices", []):
+            message = choice.get("delta", choice.get("message", {}))
+            if "function_call" in message:
+                raise ValueError("Legacy model tool calls are disabled")
+            for call in message.get("tool_calls", []):
+                if call.get("type", "function") != "function":
+                    raise ValueError("Unsupported model tool call")
+                index = (choice.get("index", 0), call.get("index", call.get("id", "")))
+                names[index] = names.get(index, "") + call.get("function", {}).get("name", "")
+    if any(name not in permitted for name in names.values()):
+        raise ValueError("Model returned a tool outside the agent role")
+
+
 class HostGateway:
     def __init__(self, profile: GatewayProfile):
         self.environment = profile.environment()
@@ -212,7 +236,7 @@ class HostGateway:
     def request(self, body, deadline):
         remaining = max(1, min(45, deadline - time.time()))
         payload = {
-            "url": self.profile.base_url.rstrip("/") + "/responses",
+            "url": self.profile.base_url.rstrip("/") + "/chat/completions",
             "key": self.environment["MODEL_GATEWAY_API_KEY"],
             "body": body,
             "timeout_ms": int(remaining * 1000),
@@ -238,14 +262,13 @@ class HostGateway:
         return 200, content_type, raw
 
 
-class CodingRun:
+class AgentRun:
     def __init__(self, root: Path, image=None):
         self.root = root
         # The caller chooses a vetted immutable image, never repository configuration.
-        self.docker = Docker(
-            root / "containers",
-            image=image or os.environ.get("SWE_PLATFORM_CODING_IMAGE", CODEX_IMAGE),
-        )
+        image = image or os.environ.get("SWE_PLATFORM_AGENT_IMAGE")
+        self.image_configured = bool(image)
+        self.docker = Docker(root / "containers", image=image or PYTHON_IMAGE)
 
     def cancel(self, key):
         execution = digest(key.encode())
@@ -261,8 +284,30 @@ class CodingRun:
             "receipt_available": (directory / "result.json").exists(),
         }
 
-    def run(self, key, files, task, allowed, gateway, *, timeout=180, max_requests=12):
-        if not key or len(key) > 200 or not 1 <= len(task.encode()) <= 16000:
+    def run(
+        self,
+        key,
+        files,
+        task,
+        allowed,
+        gateway,
+        *,
+        timeout=180,
+        max_requests=12,
+        role="coder",
+        absolute_deadline=None,
+    ):
+        if role not in ("coder", "reviewer") or (role == "reviewer" and (files or allowed)):
+            raise ValueError("Invalid agent role or reviewer capabilities")
+        if not self.image_configured:
+            raise ValueError(
+                "Build the Flue image and set SWE_PLATFORM_AGENT_IMAGE or pass --image"
+            )
+        if (
+            not key
+            or len(key) > 200
+            or not 1 <= len(task.encode()) <= (16000 if role == "coder" else 128 * 1024)
+        ):
             raise ValueError("Invalid coding job identity or task")
         if not 1 <= timeout <= 1200 or not 1 <= max_requests <= 30:
             raise ValueError("Invalid coding budget")
@@ -276,6 +321,9 @@ class CodingRun:
             if (directory / "cancel").exists():
                 raise ValueError("Coding attempt was cancelled; use a new submission key")
             spec = {
+                "runtime": AGENT_VERSION,
+                "role": role,
+                "absolute_deadline": absolute_deadline,
                 "files": files,
                 "task": task,
                 "allowed": allowed,
@@ -296,7 +344,9 @@ class CodingRun:
                 raise ValueError(
                     "Coding attempt has no receipt; reconcile its container before resubmitting"
                 )
-            deadline = time.time() + timeout
+            deadline = min(time.time() + timeout, absolute_deadline or float("inf"))
+            if time.time() >= deadline:
+                raise ValueError("Agent deadline expired before dispatch")
             atomic_write(
                 intent,
                 canonical(
@@ -373,7 +423,7 @@ class CodingRun:
                     self.docker._cancel(execution)
                     raise
             policy = BrokerPolicy(
-                gateway.profile.model, deadline=deadline, max_requests=max_requests
+                gateway.profile.model, deadline=deadline, max_requests=max_requests, role=role
             )
             frames = bytearray()
             errors = startup_errors
@@ -404,6 +454,8 @@ class CodingRun:
                                 if (directory / "cancel").exists():
                                     raise ValueError("Coding attempt was cancelled")
                                 status, content_type, data = gateway.request(body, deadline)
+                                if status == 200:
+                                    validate_reply_tools(data, content_type, role)
                                 reply = {
                                     "id": frame["id"],
                                     "status": status,
@@ -424,7 +476,9 @@ class CodingRun:
                     raise ValueError("Truncated worker protocol frame")
                 if not completion or process.returncode or completion["reason"]:
                     raise ValueError("Coding execution did not produce a complete candidate")
-                parsed = collect(base64.b64decode(completion["events"]), completion["exit_code"])
+                parsed = collect(
+                    base64.b64decode(completion["events"]), completion["exit_code"], role=role
+                )
                 if set(completion["files"]) != set(allowed):
                     raise ValueError("Candidate output scope mismatch")
                 total = 0
@@ -443,7 +497,9 @@ class CodingRun:
                     "model_requests": policy.requests,
                     "usage": parsed["usage"],
                     "cost_usd": None,
-                    "adapter_version": "codex-cli/0.153.4",
+                    "adapter_version": AGENT_VERSION,
+                    "role": role,
+                    "message": parsed["message"],
                     "image": self.docker.image,
                     "profile_sha256": gateway.identity_sha256,
                     "status": "completed",

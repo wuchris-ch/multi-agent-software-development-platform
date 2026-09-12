@@ -5,7 +5,7 @@ import json
 import uuid
 from pathlib import Path
 
-from .broker.host import CodingRun
+from .broker.host import AgentRun
 from .candidates import Workbench
 from .io import atomic_write, canonical, digest, lock
 from .sandbox.docker import Docker, safe_path
@@ -15,7 +15,7 @@ from .workspace.snapshot import snapshot
 class CandidateCoding:
     def __init__(self, root: Path, image=None):
         self.workbench = Workbench(root)
-        self.runs = CodingRun(root / "coding", image=image)
+        self.runs = AgentRun(root / "coding", image=image)
         self.root = root / "coding-intake"
 
     def run(self, key, source, task, allowed, recipe, gateway, *, timeout=180, max_requests=12):

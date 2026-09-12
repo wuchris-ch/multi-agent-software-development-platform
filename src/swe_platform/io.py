@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -35,10 +36,18 @@ def atomic_write(path: Path, data: bytes):
 
 
 @contextmanager
-def lock(path: Path):
+def lock(path: Path, *, timeout=0):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("a+") as file:
-        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
         try:
             yield file
         finally:

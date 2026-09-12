@@ -163,7 +163,7 @@ class Docker:
 
     def cancel(self, execution_id):
         directory = self.root / self.name(execution_id)
-        with lock(directory / "control.lock"):
+        with lock(directory / "control.lock", timeout=15):
             atomic_write(directory / "cancel", b"cancel requested\n")
             return self._cancel(execution_id)
 

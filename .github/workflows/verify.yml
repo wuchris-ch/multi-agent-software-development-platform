@@ -8,16 +8,21 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.22.3'
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           version: 0.9.16
           python-version: '3.12'
+      - run: npm ci --ignore-scripts
+      - run: npm test
       - run: uv sync --frozen
       - run: uv run ruff check . && uv run ruff format --check .
       - name: Prepare coding image
         run: |
-          docker build -t swe-platform-codex:local -f containers/codex.Dockerfile containers
-          echo "SWE_PLATFORM_CODING_IMAGE=$(docker image inspect swe-platform-codex:local --format '{{.Id}}')" >> "$GITHUB_ENV"
+          docker build -t swe-platform-flue:local -f containers/flue.Dockerfile .
+          echo "SWE_PLATFORM_AGENT_IMAGE=$(docker image inspect swe-platform-flue:local --format '{{.Id}}')" >> "$GITHUB_ENV"
       - run: uv run pytest -q
       - run: uv build
       - name: Installed wheel smoke

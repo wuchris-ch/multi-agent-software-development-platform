@@ -209,3 +209,66 @@ class Workbench:
             "independent_evaluation": "not_requested",
             "publication": "not_authorized",
         }
+
+    def review_agent(self, sha, gateway, *, image=None, timeout=120, max_requests=2):
+        """Run this platform's Flue reviewer through the same isolated agent boundary."""
+        from .broker.host import AGENT_VERSION, AgentRun
+
+        policy = self.policy(sha)
+        candidate = load_candidate(self.artifacts, sha)
+        directory = self.root / sha
+        agent = AgentRun(self.root / "review-agents", image=image)
+        spec = {
+            "candidate": sha,
+            "profile_sha256": gateway.identity_sha256,
+            "runtime": AGENT_VERSION,
+            "image": agent.docker.image,
+            "timeout": timeout,
+            "max_requests": max_requests,
+        }
+        request_sha = digest(canonical(spec))
+        lineage = json.loads(
+            (self.root / "workflows" / policy["workflow_id"] / "lineage.json").read_bytes()
+        )
+        if lineage["candidates"][-1] != sha:
+            raise ValueError("Cannot review a superseded candidate")
+        with lock(directory / "control.lock"):
+            path = directory / "review.json"
+            if path.exists():
+                saved = json.loads(path.read_bytes())
+                if saved.get("request_sha256") != request_sha:
+                    raise ValueError("Existing review uses a different runtime or policy")
+                validate(canonical(saved["verdict"]), self.artifacts.get(candidate["patch_sha256"]))
+                return saved
+            intent = directory / "review-intent.json"
+            if (
+                intent.exists()
+                and json.loads(intent.read_bytes()).get("request_sha256") != request_sha
+            ):
+                raise ValueError(
+                    "Review intent has a different policy; reconcile it before retrying"
+                )
+            atomic_write(intent, canonical({**spec, "request_sha256": request_sha}))
+            diff = self.artifacts.get(candidate["patch_sha256"])
+            result = agent.run(
+                request_sha,
+                {},
+                "Review this exact patch. input_sha256: " + digest(diff) + "\n\n" + diff.decode(),
+                [],
+                gateway,
+                role="reviewer",
+                timeout=timeout,
+                max_requests=max_requests,
+            )
+            verdict = validate(result["message"].encode(), diff)
+            report = {
+                "candidate": sha,
+                "request_sha256": request_sha,
+                "verdict": verdict.model_dump(),
+                "agent_execution": result["execution_id"],
+                "model_requests": result["model_requests"],
+                "usage": result["usage"],
+                "cost_usd": None,
+            }
+            atomic_write(path, canonical(report))
+            return report

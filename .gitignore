@@ -8,3 +8,4 @@ AGENTS.md
 dist/
 .env
 .env.*
+node_modules/

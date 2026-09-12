@@ -46,7 +46,7 @@ const labels: Record<string, string> = {
   verified_local: "Public checks passed",
   planning: "Planning",
   analyzing: "Specialist analysis",
-  ready_local: "Ready to deliver",
+  ready_local: "Checks and review passed",
   needs_attention: "Needs attention",
   implementing: "Coding",
   repairing: "Repairing",
@@ -362,7 +362,7 @@ export function App() {
               />
               <Metric
                 icon={<CheckCheck size={16} />}
-                label="Ready to deliver"
+                label="Locally verified"
                 value={counts.ready}
                 detail="Checks and review passed"
               />
@@ -658,6 +658,9 @@ function Overview({
 }) {
   const candidate = run.candidate;
   const published = run.publications.find((p) => p.state === "published");
+  const awaitingAcceptance =
+    run.evaluation_reserved && run.acceptance?.outcome !== "pass";
+  const deliveryReady = run.state === "ready_local" && !awaitingAcceptance;
   const pipeline = [
     {
       name: "Code",
@@ -705,45 +708,49 @@ function Overview({
           </div>
         ))}
       </div>
-      <div
-        className={`delivery-banner ${run.state === "ready_local" ? "ready" : ""}`}
-      >
+      <div className={`delivery-banner ${deliveryReady ? "ready" : ""}`}>
         <div className="delivery-icon">
-          {run.state === "ready_local" ? (
-            <CheckCheck size={22} />
-          ) : (
-            <Activity size={22} />
-          )}
+          {deliveryReady ? <CheckCheck size={22} /> : <Activity size={22} />}
         </div>
         <div>
           <h3>
             {published
               ? "The reviewed change is on GitHub"
-              : run.state === "ready_local"
-                ? "This change is ready for delivery"
-                : label(run.state)}
+              : run.state === "ready_local" && awaitingAcceptance
+                ? run.acceptance
+                  ? "Independent acceptance did not pass"
+                  : "Awaiting independent acceptance"
+                : run.state === "ready_local"
+                  ? "This change is ready for delivery"
+                  : label(run.state)}
           </h3>
           <p>
             {published
               ? `Draft PR #${published.pull_request?.number} is tied to this candidate.`
-              : run.state === "ready_local"
-                ? "Repository checks passed and independent review is clear."
-                : "The saved timeline records every attempt and its evidence."}
+              : run.state === "ready_local" && awaitingAcceptance
+                ? "Public checks and review are complete. The reserved evaluation must accept this candidate before delivery."
+                : run.state === "ready_local"
+                  ? "Repository checks passed and independent review is clear."
+                  : "The saved timeline records every attempt and its evidence."}
           </p>
         </div>
         <button
           className="text-button"
           onClick={() =>
             navigate(
-              published || run.state === "ready_local"
+              published || deliveryReady
                 ? "publication"
-                : "activity",
+                : run.state === "ready_local" && awaitingAcceptance
+                  ? "acceptance"
+                  : "activity",
             )
           }
         >
-          {published || run.state === "ready_local"
+          {published || deliveryReady
             ? "View delivery"
-            : "View activity"}
+            : run.state === "ready_local" && awaitingAcceptance
+              ? "View acceptance"
+              : "View activity"}
           <ArrowRight size={14} />
         </button>
       </div>

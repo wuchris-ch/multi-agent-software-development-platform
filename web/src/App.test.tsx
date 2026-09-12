@@ -162,8 +162,9 @@ describe("development control panel", () => {
     run.evaluation_reserved = true;
     render(<App />);
     const user = userEvent.setup();
-    await screen.findByText("This change is ready for delivery");
-    await user.click(screen.getByRole("tab", { name: "Acceptance" }));
+    await screen.findByText("Awaiting independent acceptance");
+    expect(screen.queryByText("This change is ready for delivery")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "View acceptance" }));
     await user.click(screen.getByRole("button", { name: "Upload evidence" }));
     await screen.findByText("artifacts registered");
     await user.click(screen.getByRole("button", { name: "Submit candidate" }));

@@ -77,4 +77,24 @@ The Python suite passed **124 tests**, including publication ambiguity, paginati
 
 Compare a strong single coding agent, independent review with bounded repair, and selective read-only specialists under equal task and budget conditions. Freeze tasks, model configuration, images, recipe, evaluator revision, repetitions, and decision thresholds before a comparative run.
 
-Preserve first attempts and repairs separately. Count infrastructure failures in attempted-work totals, retain paired task identities, and report missing usage explicitly. Keep hidden suites and acceptance policy outside worker access. Comparative claims require independent evaluation results; the exercise above records the observed behavior of one development task.
+Preserve first attempts and repairs separately. Count infrastructure failures in attempted-work totals, retain paired task identities, and report missing usage explicitly. Keep hidden suites and acceptance policy outside worker access. Comparative claims require independent evaluation results; the repository exercises here record individual development tasks.
+
+## Existing-repository parser repair, September 12, 2026
+
+An isolated copy of [the Flue review agent](https://github.com/wuchris-ch/pr-review-agent-flue) at `fcb314d2568dc7ea4a5e3c3d175704cc03fca77d` supplied a real parser defect. Git-quoted filenames were omitted from the file set used to attach review findings. Only `src/diff.ts` could change; tests and dependencies remained fixed.
+
+The review-mode workflow completed in **122.094 seconds**, using **11 model requests**, **65,358 reported tokens** and **zero repairs**. A separate Flue reviewer returned a clear review. All three existing public diff checks passed, and every model request had resolved usage. The invocation retained its 20-request, 200,000-token and 600-second bounds.
+
+Seven actual Git-generated patches covered plain filenames, spaces, tabs, quotes, backslashes and two Unicode filenames. The independent suite checked both header forms, CRLF input, deleted files, malformed quoting and exact whole-file partition text. The original implementation passed **8 of 24 checks**; the sealed candidate passed **24 of 24**.
+
+The first assessment reported 23 passes because Node's strict assertion compared arrays from different VM contexts. A minimal harness correction normalized the returned array before comparison; expected filenames, patch fixtures and text assertions stayed unchanged. Both assessment versions were retained. The corrected harness still rejected all 16 baseline failures, and the candidate received no edits or additional model calls.
+
+Repeating the completed workflow preserved the job, model ledger and exported evidence bundle byte for byte. Offline bundle verification passed.
+
+| Evidence | SHA-256 |
+|---|---|
+| Candidate | `0366b058d33e61e2bc72a71fb69f7f8e447eeb64d72f4e55ba4763e814c495fd` |
+| Frozen patch cases | `34bb8b6270665f4bd2a67f1b77c8df4d8dfebde415843682a347b8121275cb2e` |
+| Original acceptance harness | `7aa2b6026cee8d33506d55db6a86d5584e70a2a79b3c6216ed67c0c16dd8cbdf` |
+| Corrected acceptance harness | `e53134ef0c6dd2001f2cc0506baba5b804110144ee626519c668816f0682fdfb` |
+| Portable evidence bundle | `21a0cbffd5b86bca691c68c4535e202e0776a8898156de592915cd461ad2f55e` |

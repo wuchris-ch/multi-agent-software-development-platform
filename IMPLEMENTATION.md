@@ -33,7 +33,7 @@ Use `--review-profile review-gateway.json` to select a different model for revie
 
 ## Verification recipe
 
-Prepare dependencies in a trusted image before execution. A Python recipe is:
+Prepare dependencies in a trusted image before execution. Every verification image must provide Python 3 as `python`, as well as the recipe's executable and dependencies. The sandbox starts its isolated Python runner before invoking the recipe, including recipes that run Node or browser checks. Build these prerequisites into the image and pin its digest before starting a model-backed workflow. A Python recipe is:
 
 ```json
 {

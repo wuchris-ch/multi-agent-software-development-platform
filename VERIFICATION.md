@@ -91,6 +91,8 @@ The first assessment reported 23 passes because Node's strict assertion compared
 
 Repeating the completed workflow preserved the job, model ledger and exported evidence bundle byte for byte. Offline bundle verification passed.
 
+The platform publisher created a draft PR against the unchanged baseline in a separate private exercise repository. GitHub CI at head `1b3fa18759c691a761caa7815d2dba0071106326` passed **97 repository tests**, TypeScript checking, regression fixtures, dependency audit and build. A fresh reconciliation made **15 GET requests and no writes**, verified the exact remote files, modes and ancestry, and confirmed passing checks. The draft remains unmerged; the original source repository and its running reviewer were untouched.
+
 | Evidence | SHA-256 |
 |---|---|
 | Candidate | `0366b058d33e61e2bc72a71fb69f7f8e447eeb64d72f4e55ba4763e814c495fd` |
